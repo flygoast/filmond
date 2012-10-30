@@ -1,0 +1,5 @@
+bin/filmond
+bin/filmond.log
+src/*.o
+lib/*.a
+
