@@ -3,16 +3,10 @@
 
 #include <pthread.h>
 #include <assert.h>
-#include "dqueue.h"
+#include "heap.h"
 
 #define THREAD_STACK_SIZE   1048576     /* 1M */
 
-typedef struct task_queue_t {
-    void        (*func)(void *);
-    void        *arg;
-    int         priority;
-    dqueue_t    queue;
-} task_queue_t;
 
 typedef struct threadpool threadpool_t;
 
@@ -25,7 +19,7 @@ struct threadpool {
     pthread_mutex_t     mutex;
     pthread_cond_t      cond;
     pthread_cond_t      exit_cond;
-    dqueue_t            task_queue;
+    heap_t              task_queue;
     int                 thread_stack_size;
     int                 exit;
     int                 threads_idle;
