@@ -180,7 +180,6 @@ int threadpool_destroy(threadpool_t *pool) {
 
 static void task1(void* arg) {
     printf("%8lu: Priority HIGH\n", (unsigned long)arg);
-    sleep(1);
     return;
 }
 
@@ -195,28 +194,23 @@ static void task3(void* arg) {
 }
 
 int main(int argc, char *argv[]) {
-    long i = 100000;
+    long i = 1000000;
     threadpool_t *pool = threadpool_create(10, 100, 0);
     assert(pool);
     while (i > 0) {
-
-        assert(threadpool_add_task(pool, task2, (void*)i, 0) == 0);
-        /*
         if (i % 3 == 0) {
-            assert(threadpool_add_task(pool, task2, (void*)i, 0) == 0);
+            assert(threadpool_add_task(pool, task3, (void*)i, 1000) == 0);
         } else if (i % 3 == 1) {
-            assert(threadpool_add_task(pool, task2, (void*)i, 0) == 0);
+            assert(threadpool_add_task(pool, task2, (void*)i, 500) == 0);
         } else {
-            assert(threadpool_add_task(pool, task2, (void*)i, 0) == 0);
+            assert(threadpool_add_task(pool, task1, (void*)i, 0) == 0);
         }
-        */
         i--;
     }
 
     while (threadpool_exit(pool) != 0) {
         sleep(1);
     }
-    printf("get here\n");
     threadpool_destroy(pool);
     exit(0);
 }
