@@ -60,7 +60,7 @@ static void threadpool_thread_create(threadpool_t *pool) {
 
 static void threadpool_free_task_queue(threadpool_t *pool) {
     task_t *t;
-    while (pool->task_queue.len == 0) {
+    while (pool->task_queue.len != 0) {
         t = heap_remove(&pool->task_queue, 0);
         if (t) {
             free(t);
@@ -138,7 +138,7 @@ void threadpool_clear_task_queue(threadpool_t *pool) {
 
 int threadpool_exit(threadpool_t *pool) {
     Pthread_mutex_lock(&pool->mutex);
-    if (pool->task_queue.len == 0) {
+    if (pool->task_queue.len != 0) {
         Pthread_mutex_unlock(&pool->mutex);
         return -1;
     }
@@ -195,10 +195,13 @@ static void task3(void* arg) {
 }
 
 int main(int argc, char *argv[]) {
-    long i = 1000000;
+    long i = 100000;
     threadpool_t *pool = threadpool_create(10, 100, 0);
     assert(pool);
     while (i > 0) {
+
+        assert(threadpool_add_task(pool, task2, (void*)i, 0) == 0);
+        /*
         if (i % 3 == 0) {
             assert(threadpool_add_task(pool, task2, (void*)i, 0) == 0);
         } else if (i % 3 == 1) {
@@ -206,6 +209,7 @@ int main(int argc, char *argv[]) {
         } else {
             assert(threadpool_add_task(pool, task2, (void*)i, 0) == 0);
         }
+        */
         i--;
     }
 
