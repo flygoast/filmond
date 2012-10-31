@@ -2,7 +2,7 @@ DEBUG = -g -DDEBUG
 CC = gcc
 CFLAGS  = $(DEBUG)  -Wall
 LIB 	= -L ../lib  -linotifytools -lpthread -lcurl -lcrypto -lssl
-OO	= filmond.o log.o md5.o conf.o dqueue.o threadpool.o lock.o
+OO	= filmond.o log.o md5.o conf.o heap.o threadpool.o lock.o
 TARGETS = filmond
 
 all: $(TARGETS) $(BIN)
