@@ -7,25 +7,18 @@
 
 #define THREAD_STACK_SIZE   1048576     /* 1M */
 
-
-typedef struct threadpool threadpool_t;
-
-typedef struct thread_t {
-    pthread_t       tid;
-    threadpool_t    *pool;
-} thread_t;
-
-struct threadpool {
+typedef struct threadpool {
     pthread_mutex_t     mutex;
     pthread_cond_t      cond;
     pthread_cond_t      exit_cond;
+    pthread_cond_t      task_over_cond;
     heap_t              task_queue;
     int                 thread_stack_size;
     int                 exit;
     int                 threads_idle;
     int                 threads_num;
     int                 threads_max;
-};
+} threadpool_t;
 
 /* ------------------- Macro wrappers ---------------------*/
 #define Pthread_create(m, n, p, q) \
@@ -64,7 +57,8 @@ struct threadpool {
 extern threadpool_t *threadpool_create(int init, int max, int stack_size);
 extern int threadpool_add_task(threadpool_t *tp, 
     void (*func)(void*), void *arg, int priority);
-extern int threadpool_destroy(threadpool_t *tp);
 extern void threadpool_clear_task_queue(threadpool_t *pool);
+extern int threadpool_task_over(threadpool_t *pool, int block, int timeout);
+extern int threadpool_destroy(threadpool_t *pool, int block, int timeout);
 
 #endif /* __THREADPOOL_H_INCLUDED__ */

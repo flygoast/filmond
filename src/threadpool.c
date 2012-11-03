@@ -1,7 +1,12 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <sys/time.h>
 #include "threadpool.h"
 #include "heap.h"
+
+#define POOL_MAX_IDLE       120 /* 2 minutes */
 
 typedef struct task_st {
     void        (*func)(void *);
@@ -10,7 +15,6 @@ typedef struct task_st {
 } task_t;
 
 
-/* --------------- Private Prototypes ---------------------*/
 static int priority_less(void *ent1, void *ent2) {
     task_t *t1 = (task_t *)ent1;
     task_t *t2 = (task_t *)ent2;
@@ -21,29 +25,56 @@ static int priority_less(void *ent1, void *ent2) {
 static void* thread_loop(void *arg) {
     threadpool_t *pool = (threadpool_t*)arg;
     task_t *t = NULL;
+    struct timespec ts;
+    struct timeval  tv;
+    int ret;
+    int tosignal;
 
     while (!pool->exit) {
         Pthread_mutex_lock(&pool->mutex);
+        gettimeofday(&tv, NULL);
+        ts.tv_sec = tv.tv_sec + POOL_MAX_IDLE;
+        ts.tv_nsec = tv.tv_usec * 1000;
 
         while (pool->task_queue.len == 0) {
-            Pthread_cond_wait(&pool->cond, &pool->mutex);
+            ret = Pthread_cond_timedwait(&pool->cond, &pool->mutex, &ts);
+            if (ret == 0) {
+                if (pool->exit) {
+                    goto EXIT;
+                }
+                break;
+            } else if (ret == ETIMEDOUT) {
+                goto EXIT;
+            }
         }
+
         --pool->threads_idle;
         t = heap_remove(&pool->task_queue, 0);
+        tosignal = (pool->task_queue.len == 0) ? 1 : 0;
         Pthread_mutex_unlock(&pool->mutex);
+
+        if (tosignal) {
+            Pthread_cond_broadcast(&pool->task_over_cond);
+        }
+
         if (t) {
             t->func(t->arg);
             free(t);
         }
+
+        Pthread_mutex_lock(&pool->mutex);
         ++pool->threads_idle;
+        Pthread_mutex_unlock(&pool->mutex);
     }
 
     Pthread_mutex_lock(&pool->mutex);
-    ++pool->threads_idle;
-    if (pool->threads_idle == pool->threads_num) {
-        Pthread_cond_signal(&pool->exit_cond);
-    }
+EXIT:
+    --pool->threads_idle;
+    tosignal = --pool->threads_num ? 0 : 1;
     Pthread_mutex_unlock(&pool->mutex);
+    if (tosignal) {
+        Pthread_cond_broadcast(&pool->exit_cond);
+    }
     return NULL;
 }
 
@@ -83,6 +114,7 @@ threadpool_t *threadpool_create(int init, int max, int stack_size) {
     Pthread_mutex_init(&pool->mutex, NULL);
     Pthread_cond_init(&pool->cond, NULL);
     Pthread_cond_init(&pool->exit_cond, NULL);
+    Pthread_cond_init(&pool->task_over_cond, NULL);
 
     heap_init(&pool->task_queue);
     heap_set_less(&pool->task_queue, priority_less);
@@ -112,21 +144,21 @@ int threadpool_add_task(threadpool_t *pool,
     tq->priority = priority;
 
     Pthread_mutex_lock(&pool->mutex);
-    if (pool->task_queue.len == 0) {
-        tosignal = 1;
+    if (pool->threads_idle == 0 && pool->threads_num < pool->threads_max) {
+        threadpool_thread_create(pool);
+        ++pool->threads_idle;
+        ++pool->threads_num;
     }
-
+    tosignal = (pool->task_queue.len == 0)  ? 1 : 0;
     if (heap_insert(&pool->task_queue, tq) != 0) {
         free(tq);
         Pthread_mutex_unlock(&pool->mutex);
         return -1;
     }
-
+    Pthread_mutex_unlock(&pool->mutex);
     if (tosignal) {
         Pthread_cond_broadcast(&pool->cond);
     }
-    Pthread_mutex_unlock(&pool->mutex);
-
     return 0;
 }
 
@@ -136,38 +168,95 @@ void threadpool_clear_task_queue(threadpool_t *pool) {
     Pthread_mutex_unlock(&pool->mutex);
 }
 
-int threadpool_exit(threadpool_t *pool) {
+void threadpool_exit(threadpool_t *pool) {
     Pthread_mutex_lock(&pool->mutex);
-    if (pool->task_queue.len != 0) {
-        Pthread_mutex_unlock(&pool->mutex);
-        return -1;
-    }
+    pool->exit = 1;
     Pthread_mutex_unlock(&pool->mutex);
-    return 0;
-    /*
-    while (pool->threads_idle != pool->threads_num) {
-        Pthread_cond_wait(&pool->exit_cond, &pool->mutex);
-    }
-
-    Pthread_mutex_unlock(&pool->mutex);
-    return 0;
-    */
+    Pthread_cond_broadcast(&pool->cond);
 }
 
-int threadpool_destroy(threadpool_t *pool) {
+int threadpool_task_over(threadpool_t *pool, int block, int timeout) {
+    int ret;
+
+    Pthread_mutex_lock(&pool->mutex);
+    if (pool->task_queue.len != 0) {
+        if (!block) {
+            Pthread_mutex_unlock(&pool->mutex);
+            return -1;
+        } else {
+            struct timespec ts;
+            struct timeval  tv;
+            gettimeofday(&tv, NULL);
+            ts.tv_sec = tv.tv_sec + timeout;
+            ts.tv_nsec = tv.tv_usec * 1000;
+
+            while (pool->task_queue.len != 0) {
+                if (timeout == 0) {
+                    Pthread_cond_wait(&pool->task_over_cond, &pool->mutex);
+                } else {
+                    ret = Pthread_cond_timedwait(&pool->task_over_cond, 
+                        &pool->mutex, &ts);
+                    if (ret == 0) {
+                        Pthread_mutex_unlock(&pool->mutex);
+                        return 0;
+                    } else if (ret == ETIMEDOUT) {
+                        Pthread_mutex_unlock(&pool->mutex);
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
+    Pthread_mutex_unlock(&pool->mutex);
+    return 0;
+}
+
+int threadpool_destroy(threadpool_t *pool, int block, int timeout) {
+    int ret;
     assert(pool);
     Pthread_mutex_lock(&pool->mutex);
     if (!pool->exit) {
+        /* you should call `threadpool_exit' first */
         Pthread_mutex_unlock(&pool->mutex);
         return -1;
     }
-    Pthread_mutex_unlock(&pool->mutex);
 
-    threadpool_free_task_queue(pool);
+    if (pool->threads_num != 0) {
+        if (!block) {
+            Pthread_mutex_unlock(&pool->mutex);
+            return -1;
+        } else {
+            struct timespec ts;
+            struct timeval  tv;
+            gettimeofday(&tv, NULL);
+            ts.tv_sec = tv.tv_sec + timeout;
+            ts.tv_nsec = tv.tv_usec * 1000;
+
+            while (pool->threads_num != 0) {
+                if (timeout == 0) {
+                    Pthread_cond_wait(&pool->exit_cond, &pool->mutex);
+                    goto CONT;
+                } else {
+                    ret = Pthread_cond_timedwait(&pool->exit_cond, 
+                        &pool->mutex, &ts);
+                    if (ret == 0) {
+                        goto CONT;
+                    } else if (ret == ETIMEDOUT) {
+                        Pthread_mutex_unlock(&pool->mutex);
+                        return -1;
+                    }
+                }
+            }
+        }
+    }
+ 
+CONT:
+    Pthread_mutex_unlock(&pool->mutex);
     heap_destroy(&pool->task_queue);
     Pthread_mutex_destroy(&pool->mutex);
     Pthread_cond_destroy(&pool->cond);
     Pthread_cond_destroy(&pool->exit_cond);
+    Pthread_cond_destroy(&pool->task_over_cond);
     free(pool);
     return 0;
 }
@@ -194,24 +283,26 @@ static void task3(void* arg) {
 }
 
 int main(int argc, char *argv[]) {
-    long i = 1000000;
+    long i = 10000;
     threadpool_t *pool = threadpool_create(10, 100, 0);
     assert(pool);
     while (i > 0) {
         if (i % 3 == 0) {
-            assert(threadpool_add_task(pool, task3, (void*)i, 1000) == 0);
+            assert(threadpool_add_task(pool, task3, 
+                (void*)(long)(pool->threads_num), 1000) == 0);
         } else if (i % 3 == 1) {
-            assert(threadpool_add_task(pool, task2, (void*)i, 500) == 0);
+            assert(threadpool_add_task(pool, task2, 
+                (void*)(long)(pool->threads_num), 500) == 0);
         } else {
-            assert(threadpool_add_task(pool, task1, (void*)i, 0) == 0);
+            assert(threadpool_add_task(pool, task1, 
+                (void*)(long)(pool->threads_num), 0) == 0);
         }
         i--;
     }
 
-    while (threadpool_exit(pool) != 0) {
-        sleep(1);
-    }
-    threadpool_destroy(pool);
+    while (threadpool_task_over(pool, 1, 3) != 0) {};
+    threadpool_exit(pool);
+    assert(threadpool_destroy(pool, 1, 3) == 0);
     exit(0);
 }
 
