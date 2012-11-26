@@ -229,6 +229,10 @@ static void submit_file(char action, char *md5) {
 static int ext_is_valid(char *extension) {
     int i = 0;
 
+    if (exten[0] == NULL) {
+        return 1;
+    }
+
     for (i = 0; exten[i]; ++i) {
         if (!strcasecmp(extension, exten[i])) {
             return 1;
@@ -314,11 +318,14 @@ static int file_ev_handler(struct inotify_event *event) {
     }
 
     if ((extension = strrchr(full_path, '.')) == NULL) {
-        return 0;
-    }
-    ++extension;
-    if (!ext_is_valid(extension)) {
-        return 0; /* skip invalid extensions */
+        if (exten[0]) {
+            return 0;
+        }
+
+        ++extension;
+        if (!ext_is_valid(extension)) {
+            return 0; /* skip invalid extensions */
+        }
     }
 
     filepath = full_path + strlen(global_conf.moni_dir);
