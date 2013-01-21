@@ -1,5 +1,6 @@
 #define _XOPEN_SOURCE 500 
 #define _GNU_SOURCE
+
 #include <ftw.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +11,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include <pwd.h>
 #include <sys/resource.h>
 #include <signal.h>
 #include <sys/inotify.h>
@@ -20,16 +22,15 @@
 #include "conf.h"
 #include "log.h"
 #include "md5.h"
+#include "base64.h"
+#include "version.h"
+#include "json/json.h"
 
-#define FILMON_VERSION      "0.9.0"
+
 #define KEY_SIZE            33
-#define HTTP_BODY_SIZE      8192
 #define MAX_PATH_LEN        4096
-#define MAX_FILE_NAME_LEN   128
-#define KEY_LEN             (33 + 32)
-/* contain the space for file size */
-#define MD5_BUF_SIZE        (KEY_LEN * 50)
 #define HOSTNAME_LEN        128
+#define URI_LIMIT           1024
 #define MONI_EVENTS         (\
     IN_ATTRIB               |\
     IN_CLOSE_WRITE          |\
@@ -54,7 +55,10 @@ struct curl_slist *list;
 int  g_hostname_size;
 threadpool_t *g_pool;
 int count;
-char md5_buf[MD5_BUF_SIZE];
+json_object *files_json;
+char add_uri[URI_LIMIT];
+char delete_uri[URI_LIMIT];
+
 
 struct global_conf_st {
     char    *moni_dir;
@@ -62,8 +66,6 @@ struct global_conf_st {
     char    *valid_exten;
     char    *report_addr;
     char    *report_host;
-    int     thread_init;
-    int     thread_max;
     int     thread_stack;
     char    *log_dir;
     char    *log_name;
@@ -73,10 +75,15 @@ struct global_conf_st {
     int     log_multi;
 } global_conf;
 
+
 typedef struct task_item {
-    int     action;
-    char    *md5;
+    int             action;
+    char           *post;
 } task_item;
+
+
+static void filmond_ftw(void *arg);
+
 
 static size_t curl_write_cb(char *ptr, size_t size, 
         size_t count, void *buf) {
@@ -85,14 +92,15 @@ static size_t curl_write_cb(char *ptr, size_t size,
     return n;
 }
 
+
 /* Task callback called by thread in threadpool. */
 static void submit_file_info(void *arg) {
     task_item *item = (task_item *)arg;
     char response[RESPONSE_LIMIT] = {};  /* Must clear data with '0' */
     CURL *curl;
     CURLcode res;
-    char field[HTTP_BODY_SIZE];
     long rc = 0;
+    json_object *obj;
 
     curl = curl_easy_init();
     if (!curl) {
@@ -101,11 +109,19 @@ static void submit_file_info(void *arg) {
         goto end;
     }
 
-    curl_easy_setopt(curl, CURLOPT_URL, global_conf.report_addr);
-    snprintf(field, HTTP_BODY_SIZE, "action=%c&host=%s&md5s=%s",
-            item->action, g_hostname, item->md5);
-    DEBUG_LOG("body:%s", field);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, field);
+    if (item->action == ACTION_ADD_OR_MOD) {
+        curl_easy_setopt(curl, CURLOPT_URL, add_uri);
+    } else if (item->action == ACTION_DEL) {
+        curl_easy_setopt(curl, CURLOPT_URL, delete_uri);
+    } else {
+        /*
+         * invalid action
+         */
+        assert(0);
+    }
+
+    DEBUG_LOG("POST: %s", item->post);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, item->post);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
@@ -134,70 +150,49 @@ static void submit_file_info(void *arg) {
 
     response[RESPONSE_LIMIT - 1] = '\0';
 
-    if (strcmp(response, "success") == 0) {
-        printf("submit success\n");
-        DEBUG_LOG("submit success");
+    obj = json_tokener_parse(response);
+    if (is_error(obj) || json_object_get_type(obj) != json_type_object) {
+        printf("submit failed");
+        ERROR_LOG("Invalid json string: %s", response);
     } else {
-        fprintf(stderr, "submit failed:%s\n", response);
-        ERROR_LOG("submit failed:%s", response);
+        struct json_object *j = json_object_object_get(obj, "error");
+        if (json_object_get_type(j) != json_type_string) {
+            printf("submit failed");
+            ERROR_LOG("Invalid json string: %s", response);
+        } else {
+            if (strcmp("no error", json_object_get_string(j))) {
+                printf("submit failed");
+                ERROR_LOG("Invalid json string: %s", response);
+            } else {
+                printf("submit success\n");
+                DEBUG_LOG("submit success");
+            }
+        }
+        json_object_put(j);
     }
+
+    json_object_put(obj);
+
 
 release:
     curl_easy_cleanup(curl);
 
 end:
-    free(item->md5);
+    free(item->post);
     free(arg);
 }
 
-/* At present, there some bugs in this function.
-static void submit_file_info(void *arg) {
-    task_item *item = (task_item *)arg;
-    ghttp_request *request = NULL;
-    ghttp_status status;
-    char    *buf;
-    int     len;
-    char    body[HTTP_BODY_SIZE];
 
-    request = ghttp_request_new();
-    if (!request) {
-        fprintf(stderr, "ghttp_request_new failed\n");
-        ERROR_LOG("ghttp_request_new failed");
-        _exit(1);
+static void submit_ftw() {
+    if (threadpool_add_task(g_pool, filmond_ftw, NULL, 0) != 0) {
+        fprintf(stderr, "Add ftw task to threadpool failed\n");
+        ERROR_LOG("Add ftw task to threadpool failed");
+        exit(1);
     }
-    ghttp_set_type(request, ghttp_type_post);
-    ghttp_set_uri(request, g_reportaddr);
-    ghttp_set_header(request, http_hdr_Content_Type, 
-            "application/x-www-form-urlencoded");
-    if (g_host) {
-        ghttp_set_header(request, http_hdr_Host, g_host);
-    }
-
-    snprintf(body, HTTP_BODY_SIZE, "action=%c&host=%s&md5s=%s",
-            item->action, g_hostname, item->md5);
-    ghttp_set_body(request, body, strlen(body));
-    ghttp_prepare(request);
-    status = ghttp_process(request);
-    if (status == ghttp_error) {
-        fprintf(stderr, "ghttp_process failed\n");
-        ERROR_LOG("ghttp_process failed");
-    } else if (status == ghttp_done) {
-        buf = ghttp_get_body(request);
-        len = ghttp_get_body_len(request);
-        if (strcmp(buf, "success") == 0) {
-            printf("submit success\n");
-            DEBUG_LOG("submit success");
-        } else {
-            fprintf(stderr, "submit failed:%s\n", buf);
-            ERROR_LOG("submit failed:%s", buf);
-        }
-    }
-
-    free(arg);
 }
-*/
 
-static void submit_file(char action, char *md5) {
+
+static void submit_file(char action, json_object *obj) {
     task_item *item;
 
     /* The allocated memory freed in submit_file_info(). */
@@ -209,8 +204,9 @@ static void submit_file(char action, char *md5) {
     }
 
     item->action = action;
-    item->md5 = strdup(md5);
-    if (!item->md5) {
+    item->post = strdup(json_object_get_string(obj));
+
+    if (!item->post) {
         free(item);
         fprintf(stderr, "Out of memory\n");
         ERROR_LOG("Out of memory");
@@ -218,9 +214,9 @@ static void submit_file(char action, char *md5) {
     }
 
     if (threadpool_add_task(g_pool, submit_file_info, item, 0) != 0) {
-        fprintf(stderr, "Add task to threadpool failed:%s\n", md5);
-        ERROR_LOG("Add task to threadpool failed:%s", md5);
-        free(item->md5);
+        fprintf(stderr, "Add task to threadpool failed: %s\n", item->post);
+        ERROR_LOG("Add task to threadpool failed: %s", item->post);
+        free(item->post);
         free(item);
     }
 }
@@ -241,6 +237,7 @@ static int ext_is_valid(char *extension) {
 
     return 0;
 }
+
 
 static int dir_ev_handler(struct inotify_event *event) {
     char full_path[MAX_PATH_LEN];
@@ -298,14 +295,96 @@ static int dir_ev_handler(struct inotify_event *event) {
     return 0;
 }
 
+
+static void add_fileinfo_json(char *filepath, char *key, 
+        const struct stat *st) {
+    char buf[1024] = {};
+    char *buf_big = NULL;
+    char *ptr = buf;
+    int filepath_len;
+    int base64_len;
+    struct passwd  pw, *ret_pw;
+
+    json_object *fileinfo_json;
+
+    filepath_len = strlen(filepath);
+    if ((filepath_len + 2) / 3 * 4 >= 1024) {
+        buf_big = malloc((filepath_len + 2) / 3 * 4);
+        assert(buf_big);
+        ptr = buf_big;
+    }
+
+    base64_len = base64_encode((unsigned char *)filepath, strlen(filepath),
+        (unsigned char *)ptr);
+
+    fileinfo_json = json_object_new_object();
+
+    json_object_object_add(fileinfo_json, "filename",
+        json_object_new_string_len(ptr, base64_len));
+
+    json_object_object_add(fileinfo_json, "size", 
+        json_object_new_int(st->st_size));
+
+    json_object_object_add(fileinfo_json, "mtime",
+        json_object_new_int(st->st_mtime));
+
+    json_object_object_add(fileinfo_json, "mode",
+        json_object_new_int(st->st_mode));
+
+    assert(getpwuid_r(st->st_uid, &pw, buf, 1024, &ret_pw) == 0);
+
+    json_object_object_add(fileinfo_json, "owner",
+        json_object_new_string(pw.pw_name));
+
+    json_object_object_add(files_json, key, fileinfo_json);
+
+    if (buf_big) {
+        free(buf_big);
+    }
+}
+
+static void submit_event_post(int action, char *filepath, char *key, 
+        struct stat *st) {
+    assert(files_json);
+    files_json = json_object_new_object();
+
+    if (action == ACTION_DEL) {
+        json_object_object_add(files_json, key, json_object_new_object());
+        submit_file(ACTION_DEL, files_json);
+    } else if (action == ACTION_ADD_OR_MOD) {
+        add_fileinfo_json(filepath, key, st);
+        submit_file(ACTION_ADD_OR_MOD, files_json);
+    }
+
+    json_object_put(files_json);
+    files_json = NULL;
+}
+
+
+static void submit_ftw_post(char *filepath, char *key, const struct stat *st) {
+    if (files_json == NULL) {
+        files_json = json_object_new_object();
+    }
+
+    add_fileinfo_json(filepath, key, st);
+
+    if (++count >= 30) {
+        submit_file(ACTION_ADD_OR_MOD, files_json);
+        json_object_put(files_json);
+        files_json = NULL;
+        count = 0;
+    }
+}
+
+
 static int file_ev_handler(struct inotify_event *event) {
     char full_path[MAX_PATH_LEN];
     int len, i;
     /* Must be `unsigned char'. */
     unsigned char hash[16];
-    char key[KEY_LEN];
+    char key[KEY_SIZE];
     char *ptr = key;
-    char *end = ptr + KEY_LEN;
+    char *end = ptr + KEY_SIZE;
     char *filepath;
     char *extension;
     struct stat st;
@@ -317,11 +396,10 @@ static int file_ev_handler(struct inotify_event *event) {
         return 0;
     }
 
-    if ((extension = strrchr(full_path, '.')) == NULL) {
-        if (exten[0]) {
+    if (global_conf.valid_exten) {
+        if ((extension = strrchr(full_path, '.')) == NULL) {
             return 0;
         }
-
         ++extension;
         if (!ext_is_valid(extension)) {
             return 0; /* skip invalid extensions */
@@ -338,10 +416,11 @@ static int file_ev_handler(struct inotify_event *event) {
         ptr = key;
         for (i = 0; i < 16; ++i) {
             ptr += snprintf(ptr, end - ptr, "%02x", hash[i]);
-        }   
-        snprintf(ptr, end - ptr, "|%lu", (long)0);
+        }
 
-        submit_file(ACTION_DEL, key);
+        /* Delete event don't need stat structure */
+        submit_event_post(ACTION_DEL, filepath, key, NULL);
+
         DEBUG_LOG("%s deleted", filepath);
         printf("%s deleted\n", filepath);
     } else if (event->mask & IN_CREATE) {
@@ -365,9 +444,8 @@ static int file_ev_handler(struct inotify_event *event) {
         for (i = 0; i < 16; ++i) {
             ptr += snprintf(ptr, end - ptr, "%02x", hash[i]);
         }   
-        snprintf(ptr, end - ptr, "|%lu", st.st_size);
 
-        submit_file(ACTION_ADD_OR_MOD, key);
+        submit_event_post(ACTION_ADD_OR_MOD, filepath, key, &st);
         DEBUG_LOG("%s modified or created", filepath);
         printf("%s modified or created\n", filepath);
     } else {
@@ -378,6 +456,7 @@ static int file_ev_handler(struct inotify_event *event) {
     }
     return 0;
 }
+
 
 int moni(char *monidir) {
     struct inotify_event *event;
@@ -392,8 +471,7 @@ int moni(char *monidir) {
         }
     } else {
         if (!inotifytools_initialize() 
-                || !inotifytools_watch_recursively(monidir, 
-                    MONI_EVENTS)) {
+                || !inotifytools_watch_recursively(monidir, MONI_EVENTS)) {
             ERROR_LOG("%s:%s", strerror(inotifytools_error()), monidir);
             fprintf(stderr, "%s:%s\n", strerror(inotifytools_error()), monidir);
             return -1;
@@ -401,6 +479,8 @@ int moni(char *monidir) {
     }
 
     inotifytools_set_printf_timefmt("%F %T");
+
+    submit_ftw();
 
     /* Now wait till we get a event. */
     do {
@@ -426,6 +506,7 @@ int moni(char *monidir) {
     return -1;
 }
 
+
 static int init_hostname() {
     int ret;
     g_hostname_size = HOSTNAME_LEN;
@@ -445,6 +526,7 @@ static int init_hostname() {
 
     return ret;
 }
+
 
 static int ftw_cb(const char *fpath, const struct stat *st,
         int tflag, struct FTW *ftwbuf) {
@@ -479,6 +561,7 @@ static int ftw_cb(const char *fpath, const struct stat *st,
     }
 
 conti:
+
     if (global_conf.valid_exten) {
         if ((extension = strrchr(fpath, '.')) == NULL) {
             printf("No extension:%s\n", fpath);
@@ -509,16 +592,8 @@ conti:
     }
 
     DEBUG_LOG("File: %s, MD5: %s, SIZE: %lu", filepath, key, st->st_size);
-    if (*md5_buf == '\0') {
-        snprintf(md5_buf, MD5_BUF_SIZE, "%s|%lu", key, st->st_size);
-    } else {
-        snprintf(md5_buf + strlen(md5_buf), MD5_BUF_SIZE - strlen(md5_buf),
-            "#%s|%lu", key, st->st_size);
-        if (MD5_BUF_SIZE - strlen(md5_buf) < KEY_LEN) {
-            submit_file(ACTION_ADD_OR_MOD, md5_buf);
-            *md5_buf = '\0';
-        }
-    }
+
+    submit_ftw_post(filepath, key, st);
 
     ts.tv_sec = 0;
     ts.tv_nsec = 100;
@@ -526,14 +601,30 @@ conti:
     return 0; /* continue */
 }
 
+
+static void filmond_ftw(void *arg) {
+    int flags = FTW_ACTIONRETVAL | FTW_PHYS;
+
+    /* Submit all files to server. */
+    if (nftw(global_conf.moni_dir, ftw_cb, 20, flags) != 0) {
+        fprintf(stderr, "nftw failed:%s\n", strerror(errno));
+        ERROR_LOG("nftw failed:%s", strerror(errno));
+    }
+
+    if (count > 0) {
+        submit_file(ACTION_ADD_OR_MOD, files_json);
+        json_object_put(files_json);
+        files_json = NULL;
+    }
+}
+
+
 static struct option long_options[] = {
     {"moni-dir", required_argument, NULL, 'd'},
     {"exclude", required_argument, NULL, 'e'},
     {"valid-exten", required_argument, NULL, 'a'},
     {"report-addr", required_argument, NULL, 'r'},
     {"report-host", required_argument, NULL, 'h'},
-    {"thread-init", required_argument, NULL, 't'},
-    {"thread-max", required_argument, NULL, 'x'},
     {"thread-stack", required_argument, NULL, 's'},
     {"log-dir", required_argument, NULL, 'i'},
     {"log-name", required_argument, NULL, 'f'},
@@ -547,8 +638,9 @@ static struct option long_options[] = {
     {"help", 0, NULL, 'H'},
 };
 
-static void filmon_usage() {
-    printf("usage: filmon [--config=conf_file|--help|--version|OPTIONS]"
+
+static void filmond_usage() {
+    printf("usage: filmond [--config=conf_file|--help|--version|OPTIONS]"
             " [--verbose]\n");
     printf("\nOPTIONS:\n");
     printf("  --moni-dir|-d       directory to monitor\n");
@@ -556,9 +648,6 @@ static void filmon_usage() {
     printf("  --valid-exten|-a    valid externsion\n"); 
     printf("  --report-addr|-r    file list server address\n");
     printf("  --report-host|-h    file list server host\n");
-    printf("  --thread-init|-t    initialized number of threads"
-            " in thread pool\n");
-    printf("  --thread-max|-x     max number of threads in thread pool\n");  
     printf("  --thread-stack|-s   stack size of a thread\n");
     printf("  --log-dir|-i        log directory\n");
     printf("  --log-name|-f       log file name\n");
@@ -570,7 +659,10 @@ static void filmon_usage() {
     printf("  --verbose|-v        verbose mode\n");
     printf("  --version|-V        print version information\n");
     printf("  --help|-H           print help information\n");
+
+    printf("%s\n", FILMOND_COPYRIGHT);
 }
+
 
 #ifdef DEBUG
 void rlimit_reset() {
@@ -583,10 +675,12 @@ void rlimit_reset() {
 }
 #endif /* DEBUG */
 
+
 void sig_handler(int signo) {
     FATAL_LOG("Receive signo:%d", signo);
     exit(111);
 }
+
 
 static void set_sig_handlers() {
     int r;
@@ -609,8 +703,8 @@ static void set_sig_handlers() {
     sigaction(SIGQUIT, &sa, 0);
 }
 
+
 int main(int argc, char **argv) {
-    int flags = FTW_ACTIONRETVAL | FTW_PHYS;
     int c, ret;
     char *conf_file = NULL;
     config_t g_conf;
@@ -623,7 +717,7 @@ int main(int argc, char **argv) {
 
     set_sig_handlers();
 
-    while ((c = getopt_long(argc, argv, "d:e:a:r:h:t:x:s:i:f:l:z:n:m:c:vVH", 
+    while ((c = getopt_long(argc, argv, "d:e:a:r:h:s:i:f:l:z:n:m:c:vVH", 
                 long_options, NULL)) != -1) {
         switch (c) {
         case 'm':
@@ -647,18 +741,13 @@ int main(int argc, char **argv) {
         case 's':
             global_conf.thread_stack = atoi(optarg);
             break;
-        case 'x':
-            global_conf.thread_max = atoi(optarg);
-            break;
-        case 't':
-            global_conf.thread_init = atoi(optarg);
-            break;
         case 'V':
-            printf("filmon: %s, compiled at %s %s\n", 
-                    FILMON_VERSION, __DATE__, __TIME__);
+            printf("filmond: %s, compiled at %s %s\n", 
+                   FILMOND_VERSION, __DATE__, __TIME__);
+            printf("%s\n", FILMOND_COPYRIGHT);
             exit(0);
         case 'H':
-            filmon_usage();
+            filmond_usage();
             exit(0);
         case 'v':
             verbose = 1;
@@ -685,7 +774,7 @@ int main(int argc, char **argv) {
     }
 
     if (argc != optind) {
-        filmon_usage();
+        filmond_usage();
         exit(1);
     }
 
@@ -698,19 +787,15 @@ int main(int argc, char **argv) {
         }
 
         global_conf.moni_dir = config_get_str_value(&g_conf, 
-                "moni_dir", "/usr/local/apache2/htdocs");
+            "moni_dir", "/usr/local/apache2/htdocs");
         global_conf.exclude = config_get_str_value(&g_conf,
-                "exclude", NULL);
+            "exclude", NULL);
         global_conf.valid_exten = config_get_str_value(&g_conf, 
             "valid_exten", NULL);
         global_conf.report_addr = config_get_str_value(&g_conf, 
             "report_addr", NULL);
         global_conf.report_host = config_get_str_value(&g_conf, 
             "report_host", NULL);
-        global_conf.thread_init = 
-            config_get_int_value(&g_conf, "thread_init", 10);
-        global_conf.thread_max =
-            config_get_int_value(&g_conf, "thread_max", 20);
         global_conf.thread_stack =
             config_get_int_value(&g_conf, "thread_stack", 1048576);
         global_conf.log_dir = config_get_str_value(&g_conf, "log_dir", ".");
@@ -725,26 +810,37 @@ int main(int argc, char **argv) {
         global_conf.log_multi = config_get_int_value(&g_conf, 
             "log_multi", LOG_MULTI_NO);
     } else {
-        if (!global_conf.moni_dir) 
+        if (!global_conf.moni_dir) {
             global_conf.moni_dir = "/usr/local/apache2/htdocs";
-        if (!global_conf.thread_init) 
-            global_conf.thread_init = 10;
-        if (!global_conf.thread_max)
-            global_conf.thread_max = 20;
-        if (!global_conf.thread_stack) 
+        }
+
+        if (!global_conf.thread_stack) {
             global_conf.thread_stack = 1048576;
-        if (!global_conf.log_dir) 
+        }
+
+        if (!global_conf.log_dir) {
             global_conf.log_dir = ".";
-        if (!global_conf.log_name) 
+        }
+
+        if (!global_conf.log_name) {
             global_conf.log_name = "filmond.log";
-        if (!global_conf.log_level)
+        }
+
+        if (!global_conf.log_level) {
             global_conf.log_level = LOG_LEVEL_ALL;
-        if (!global_conf.log_size)
+        }
+
+        if (!global_conf.log_size) {
             global_conf.log_size = LOG_FILE_SIZE;
-        if (!global_conf.log_num)
+        }
+
+        if (!global_conf.log_num) {
             global_conf.log_num = LOG_FILE_NUM;
-        if (!global_conf.log_multi)
+        }
+        
+        if (!global_conf.log_multi) {
             global_conf.log_multi = LOG_MULTI_NO;
+        }
     }
 
     if (global_conf.valid_exten) {
@@ -779,10 +875,19 @@ int main(int argc, char **argv) {
         list = curl_slist_append(list, header_buf);
     }
 
+    list = curl_slist_append(list, "Content-Type: application/json");
+
     if (init_hostname() != 0) {
         fprintf(stderr, "%s\n", strerror(errno));
         boot_notify(-1, "Get hostname");
+        exit(1);
     }
+
+    snprintf(add_uri, URI_LIMIT, "%s?host=%s&action=add", 
+        global_conf.report_addr, g_hostname);
+
+    snprintf(delete_uri, URI_LIMIT, "%s?host=%s&action=delete", 
+        global_conf.report_addr, g_hostname);
 
     if (curl_global_init(CURL_GLOBAL_ALL) != 0) {
         fprintf(stderr, "curl_global_init failed:\n");
@@ -803,27 +908,15 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Create threadpool. */
-    g_pool = threadpool_create(
-            global_conf.thread_init,
-            global_conf.thread_max,
-            global_conf.thread_stack);
+    /*
+     * To promise FIFO of submitting, I just create one thread in the pool.
+     */ 
+    g_pool = threadpool_create(1, 1, global_conf.thread_stack);
     assert(g_pool);
 
-    /* Submit all files to server. */
-    if (nftw(global_conf.moni_dir, ftw_cb, 20, flags) != 0) {
-        fprintf(stderr, "nftw failed:%s\n", strerror(errno));
-        ERROR_LOG("nftw failed:%s", strerror(errno));
-    }
-
-    if (*md5_buf != '\0') {
-        submit_file(ACTION_ADD_OR_MOD, md5_buf);
-        *md5_buf = '\0';
-    }
-
     if (moni(global_conf.moni_dir) != 0) {
-        FATAL_LOG("filmon exit abnormally");
-        fprintf(stderr, "filmon exit abnormally\n");
+        FATAL_LOG("filmond exit abnormally");
+        fprintf(stderr, "filmond exit abnormally\n");
     }
 
     curl_slist_free_all(list);
