@@ -14,10 +14,25 @@ prepare for gathering the reporting.
 The information is reported through HTTP. You can use any server-end script
 to process them.
 
-Dependents
-----------
 
-inotifytool(https://github.com/rvoicilas/inotify-tools)
-libcurl(https://github.com/bagder/curl)
-json-c(https://github.com/json-c/json-c)
+Requirements
+------------
+
+* inotifytool(https://github.com/rvoicilas/inotify-tools)
+
+* libcurl(https://github.com/bagder/curl)
+
+* json-c(https://github.com/json-c/json-c)
+
+Build
+-----
+
+    # make
+    # make install
+
+
+Limits
+------
+
+It can ONLY run at Linux.
 
