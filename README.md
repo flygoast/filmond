@@ -12,7 +12,19 @@ informations of the file to a controling server which you should
 prepare for gathering the reporting.
 
 The information is reported through HTTP. You can use any server-end script
-to process them.
+to process them. You can also write your plugin to process the file event
+according to your need. Please refer the plugin directory.
+
+Plugins
+-------
+
+* submit
+
+By HTTP, submit file information to remote server.
+
+* chmod 
+
+Process invalid file permisssion.
 
 
 Requirements
