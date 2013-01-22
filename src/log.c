@@ -95,7 +95,7 @@ int log_init(const char *dir, const char *filename, int level, int size,
     }
 
     if (access(dir, W_OK)) {
-        fprintf(stderr, "access log dir %s failed:%s\n", dir,
+        fprintf(stderr, "access log dir \"%s\" failed:%s\n", dir,
             strerror(errno));
         return -1;
     }

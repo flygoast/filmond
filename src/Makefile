@@ -1,8 +1,9 @@
 DEBUG = -g -DDEBUG
 CC = gcc
 CFLAGS  = $(DEBUG)  -Wall
-LIB 	= -L ../lib  -linotifytools -lpthread -lcurl -lcrypto -lssl -ljson
-OO	= filmond.o log.o md5.o conf.o heap.o threadpool.o lock.o base64.o
+LIB 	=  -rdynamic -L ../lib  -linotifytools -lpthread -ldl
+OO	= filmond.o log.o conf.o hash.o so.o vector.o lock.o heap.o threadpool.o \
+	  base64.o md5.o
 TARGETS = filmond
 VERS = version.h
 

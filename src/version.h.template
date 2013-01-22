@@ -6,6 +6,7 @@
     "\nCopyright (C) 2012, 2013 by FengGu\n"                \
     "'filmond' is a daemon used to monitor and collect\n"   \
     "file informaton using Linux inotify.\n"                \
+    "Repo: https://github.com/flygoast/filmond\n"           \
     "BugReport: <flygoast@126.com>\n"
 
 #endif /* __VERSION_H_INCLUDED__ */

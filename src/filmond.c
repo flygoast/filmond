@@ -11,26 +11,22 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
-#include <pwd.h>
-#include <sys/resource.h>
+#include <limits.h>
 #include <signal.h>
+#include <pthread.h>
+#include <sys/resource.h>
 #include <sys/inotify.h>
-#include <curl/curl.h>
+#include "conf.h"
+#include "so.h"
+#include "log.h"
+#include "vector.h"
+#include "plugin.h"
+#include "version.h"
 #include "inotifytools/inotify.h"
 #include "inotifytools/inotifytools.h"
-#include "threadpool.h"
-#include "conf.h"
-#include "log.h"
-#include "md5.h"
-#include "base64.h"
-#include "version.h"
-#include "json/json.h"
 
-
-#define KEY_SIZE            33
 #define MAX_PATH_LEN        4096
 #define HOSTNAME_LEN        128
-#define URI_LIMIT           1024
 #define MONI_EVENTS         (\
     IN_ATTRIB               |\
     IN_CLOSE_WRITE          |\
@@ -42,183 +38,224 @@
     IN_DONT_FOLLOW          |\
     IN_ONLYDIR              )
 
-#define RESPONSE_LIMIT      1024
-#define MIN(a, b)           ((a) < (b) ? (a) : (b))
 
-#define ACTION_ADD_OR_MOD       'a'
-#define ACTION_DEL              'd'
-
-char *g_hostname;
-char *exten[30];
-char *exclude[30];
-struct curl_slist *list;
-int  g_hostname_size;
-threadpool_t *g_pool;
-int count;
-json_object *files_json;
-char add_uri[URI_LIMIT];
-char delete_uri[URI_LIMIT];
+char            *g_hostname;
+static char     *exten[30];
+static char     *exclude[30];
+static int       g_hostname_size;
+static vector_t  plugin_vec;
 
 
 struct global_conf_st {
+    char    *plugin_dir;
     char    *moni_dir;
     char    *exclude;
     char    *valid_exten;
-    char    *report_addr;
-    char    *report_host;
-    int     thread_stack;
     char    *log_dir;
     char    *log_name;
-    int     log_level;
-    int     log_size;
-    int     log_num;
-    int     log_multi;
+    int      log_level;
+    int      log_size;
+    int      log_num;
+    int      log_multi;
 } global_conf;
 
 
-typedef struct task_item {
-    int             action;
-    char           *post;
-} task_item;
+typedef struct so_func_s {
+    int (*plugin_init)(conf_t *conf);
+    int (*plugin_file_ftw)(char *filepath, const struct stat *st);
+    int (*plugin_file_event)(int action, char *filepath, const struct stat *st);
+    int (*plugin_deinit)(conf_t *conf);
+    int (*plugin_ftw_post)();
+} so_func_t;
 
 
-static void filmond_ftw(void *arg);
+typedef struct filmond_plugin_s {
+    char        *so_name;
+    void        *handle;
+    so_func_t    func;
+} filmond_plugin_t;
 
 
-static size_t curl_write_cb(char *ptr, size_t size, 
-        size_t count, void *buf) {
-    size_t n = MIN((size * count), RESPONSE_LIMIT - strlen((char *)buf));
-    memcpy((char *)buf + strlen((char *)buf), ptr, n);
-    return n;
+static void *filmond_ftw(void *arg);
+
+
+static int load_filmond_plugin(void *key, void *value, void *userptr) {
+    vector_t           *vec = (vector_t *)userptr;
+    filmond_plugin_t    plugin;
+    char                fullpath[PATH_MAX];
+    symbol_t            syms[] = {
+        { "plugin_init",       (void **)&plugin.func.plugin_init,       1 },
+        { "plugin_file_ftw",   (void **)&plugin.func.plugin_file_ftw,   1 },
+        { "plugin_file_event", (void **)&plugin.func.plugin_file_event, 1 },
+        { "plugin_deinit",     (void **)&plugin.func.plugin_deinit,     1 },
+        { "plugin_ftw_post",   (void **)&plugin.func.plugin_ftw_post,   1 },
+        { NULL,                NULL,                                    0 }
+    };
+
+    snprintf(fullpath, PATH_MAX - 1, "%s/%s", global_conf.plugin_dir,
+             (char *)value);
+
+    if (load_so(&plugin.handle, syms, fullpath) < 0) {
+        return -1;
+    }
+
+    vector_push(vec, &plugin);
+
+    return 0;
 }
 
 
-/* Task callback called by thread in threadpool. */
-static void submit_file_info(void *arg) {
-    task_item *item = (task_item *)arg;
-    char response[RESPONSE_LIMIT] = {};  /* Must clear data with '0' */
-    CURL *curl;
-    CURLcode res;
-    long rc = 0;
-    json_object *obj;
-
-    curl = curl_easy_init();
-    if (!curl) {
-        fprintf(stderr, "curl_easy_init failed\n");
-        ERROR_LOG("curl_easy_init failed");
-        goto end;
+static int load_plugins(conf_t *conf) {
+    if (vector_init(&plugin_vec, 4, sizeof(filmond_plugin_t)) < 0) {
+        return -1;
     }
 
-    if (item->action == ACTION_ADD_OR_MOD) {
-        curl_easy_setopt(curl, CURLOPT_URL, add_uri);
-    } else if (item->action == ACTION_DEL) {
-        curl_easy_setopt(curl, CURLOPT_URL, delete_uri);
-    } else {
-        /*
-         * invalid action
-         */
-        assert(0);
+    if (conf_array_foreach(conf, "plugin_so", load_filmond_plugin, 
+            &plugin_vec) < 0) {
+        return -1;
     }
 
-    DEBUG_LOG("POST: %s", item->post);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, item->post);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    return 0;
+}
 
-    res = curl_easy_perform(curl);
-    if (res != 0) {
-        fprintf(stderr, "curl_easy_perform failed:%s\n", 
-                curl_easy_strerror(res));
-        ERROR_LOG("curl_easy_perform failed:%s", curl_easy_strerror(res));
-        goto release;
+
+static void unload_plugins() {
+    filmond_plugin_t    *plugin;
+    int                  i;
+    
+    for (i = 0; i < plugin_vec.count; ++i) {
+        plugin = vector_get_at(&plugin_vec, i);
+        unload_so(&plugin->handle);
     }
+}
 
-    res = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &rc);
-    if (res != 0) {
-        fprintf(stderr, "curl_easy_getinfo failed:%s\n", 
-                curl_easy_strerror(res));
-        ERROR_LOG("curl_easy_getinfo failed:%s", curl_easy_strerror(res));
-        goto release;
-    }
 
-    if (rc != 200) {
-        fprintf(stderr, "submit failed: HTTP CODE: %ld\n", rc);
-        ERROR_LOG("submit failed: HTTP CODE: %ld", rc);
-        goto release;
-    }
+static int init_plugins(conf_t *conf) {
+    filmond_plugin_t    *plugin;
+    int                  i;
+    int                  ret;
 
-    response[RESPONSE_LIMIT - 1] = '\0';
+    for (i = plugin_vec.count - 1; i >= 0; --i) {
 
-    obj = json_tokener_parse(response);
-    if (is_error(obj) || json_object_get_type(obj) != json_type_object) {
-        printf("submit failed");
-        ERROR_LOG("Invalid json string: %s", response);
-    } else {
-        struct json_object *j = json_object_object_get(obj, "error");
-        if (json_object_get_type(j) != json_type_string) {
-            printf("submit failed");
-            ERROR_LOG("Invalid json string: %s", response);
-        } else {
-            if (strcmp("no error", json_object_get_string(j))) {
-                printf("submit failed");
-                ERROR_LOG("Invalid json string: %s", response);
-            } else {
-                printf("submit success\n");
-                DEBUG_LOG("submit success");
-            }
+        plugin = vector_get_at(&plugin_vec, i);
+        ret = plugin->func.plugin_init(conf);
+
+        if (ret == FILMOND_DECLINED) {
+            continue;
+        } else if (ret == FILMOND_DONE) {
+            break;
+        } else if (ret == FILMOND_ERROR) {
+            return -1;
         }
-        json_object_put(j);
     }
 
-    json_object_put(obj);
-
-
-release:
-    curl_easy_cleanup(curl);
-
-end:
-    free(item->post);
-    free(arg);
+    return 0;
 }
 
 
-static void submit_ftw() {
-    if (threadpool_add_task(g_pool, filmond_ftw, NULL, 0) != 0) {
-        fprintf(stderr, "Add ftw task to threadpool failed\n");
-        ERROR_LOG("Add ftw task to threadpool failed");
-        exit(1);
+static int deinit_plugins(conf_t *conf) {
+    filmond_plugin_t    *plugin;
+    int                  i;
+    int                  ret;
+
+    for (i = plugin_vec.count - 1; i >= 0; --i) {
+
+        plugin = vector_get_at(&plugin_vec, i);
+        ret = plugin->func.plugin_deinit(conf);
+
+        if (ret == FILMOND_DECLINED) {
+            continue;
+        } else if (ret == FILMOND_DONE) {
+            break;
+        } else if (ret == FILMOND_ERROR) {
+            return -1;
+        }
     }
+
+    return 0;
 }
 
 
-static void submit_file(char action, json_object *obj) {
-    task_item *item;
+static int file_ftw_plugins(char *filepath, const struct stat *st) {
+    filmond_plugin_t    *plugin;
+    int                  i;
+    int                  ret;
 
-    /* The allocated memory freed in submit_file_info(). */
-    item = (task_item*)malloc(sizeof(*item));
-    if (!item) {
-        fprintf(stderr, "Out of memory\n");
-        ERROR_LOG("Out of memory");
-        return;
+    for (i = plugin_vec.count - 1; i >= 0; --i) {
+
+        plugin = vector_get_at(&plugin_vec, i);
+        ret = plugin->func.plugin_file_ftw(filepath, st);
+
+        if (ret == FILMOND_DECLINED) {
+            continue;
+        } else if (ret == FILMOND_DONE) {
+            break;
+        } else if (ret == FILMOND_ERROR) {
+            return -1;
+        }
     }
 
-    item->action = action;
-    item->post = strdup(json_object_get_string(obj));
+    return 0;
+}
 
-    if (!item->post) {
-        free(item);
-        fprintf(stderr, "Out of memory\n");
-        ERROR_LOG("Out of memory");
-        return;
+
+static int file_event_plugins(int action, char *filepath, 
+        const struct stat *st) {
+    filmond_plugin_t    *plugin;
+    int                  i;
+    int                  ret;
+
+    for (i = plugin_vec.count - 1; i >= 0; --i) {
+
+        plugin = vector_get_at(&plugin_vec, i);
+        ret = plugin->func.plugin_file_event(action, filepath, st);
+
+        if (ret == FILMOND_DECLINED) {
+            continue;
+        } else if (ret == FILMOND_DONE) {
+            break;
+        } else if (ret == FILMOND_ERROR) {
+            return -1;
+        }
     }
 
-    if (threadpool_add_task(g_pool, submit_file_info, item, 0) != 0) {
-        fprintf(stderr, "Add task to threadpool failed: %s\n", item->post);
-        ERROR_LOG("Add task to threadpool failed: %s", item->post);
-        free(item->post);
-        free(item);
+    return 0;
+}
+
+
+static int ftw_post_plugins() {
+    filmond_plugin_t    *plugin;
+    int                  i;
+    int                  ret;
+
+    for (i = plugin_vec.count - 1; i >= 0; --i) {
+
+        plugin = vector_get_at(&plugin_vec, i);
+        ret = plugin->func.plugin_ftw_post();
+
+        if (ret == FILMOND_DECLINED) {
+            continue;
+        } else if (ret == FILMOND_DONE) {
+            break;
+        } else if (ret == FILMOND_ERROR) {
+            return -1;
+        }
     }
+
+    return 0;
+}
+
+
+static void start_ftw() {
+    pthread_t       tid;
+    pthread_attr_t  attr;
+
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+    assert(pthread_create(&tid, &attr, filmond_ftw, NULL) == 0);
+
+    pthread_attr_destroy(&attr);
 }
 
 
@@ -296,98 +333,12 @@ static int dir_ev_handler(struct inotify_event *event) {
 }
 
 
-static void add_fileinfo_json(char *filepath, char *key, 
-        const struct stat *st) {
-    char buf[1024] = {};
-    char *buf_big = NULL;
-    char *ptr = buf;
-    int filepath_len;
-    int base64_len;
-    struct passwd  pw, *ret_pw;
-
-    json_object *fileinfo_json;
-
-    filepath_len = strlen(filepath);
-    if ((filepath_len + 2) / 3 * 4 >= 1024) {
-        buf_big = malloc((filepath_len + 2) / 3 * 4);
-        assert(buf_big);
-        ptr = buf_big;
-    }
-
-    base64_len = base64_encode((unsigned char *)filepath, strlen(filepath),
-        (unsigned char *)ptr);
-
-    fileinfo_json = json_object_new_object();
-
-    json_object_object_add(fileinfo_json, "filename",
-        json_object_new_string_len(ptr, base64_len));
-
-    json_object_object_add(fileinfo_json, "size", 
-        json_object_new_int(st->st_size));
-
-    json_object_object_add(fileinfo_json, "mtime",
-        json_object_new_int(st->st_mtime));
-
-    json_object_object_add(fileinfo_json, "mode",
-        json_object_new_int(st->st_mode));
-
-    assert(getpwuid_r(st->st_uid, &pw, buf, 1024, &ret_pw) == 0);
-
-    json_object_object_add(fileinfo_json, "owner",
-        json_object_new_string(pw.pw_name));
-
-    json_object_object_add(files_json, key, fileinfo_json);
-
-    if (buf_big) {
-        free(buf_big);
-    }
-}
-
-static void submit_event_post(int action, char *filepath, char *key, 
-        struct stat *st) {
-    assert(files_json);
-    files_json = json_object_new_object();
-
-    if (action == ACTION_DEL) {
-        json_object_object_add(files_json, key, json_object_new_object());
-        submit_file(ACTION_DEL, files_json);
-    } else if (action == ACTION_ADD_OR_MOD) {
-        add_fileinfo_json(filepath, key, st);
-        submit_file(ACTION_ADD_OR_MOD, files_json);
-    }
-
-    json_object_put(files_json);
-    files_json = NULL;
-}
-
-
-static void submit_ftw_post(char *filepath, char *key, const struct stat *st) {
-    if (files_json == NULL) {
-        files_json = json_object_new_object();
-    }
-
-    add_fileinfo_json(filepath, key, st);
-
-    if (++count >= 30) {
-        submit_file(ACTION_ADD_OR_MOD, files_json);
-        json_object_put(files_json);
-        files_json = NULL;
-        count = 0;
-    }
-}
-
-
 static int file_ev_handler(struct inotify_event *event) {
-    char full_path[MAX_PATH_LEN];
-    int len, i;
-    /* Must be `unsigned char'. */
-    unsigned char hash[16];
-    char key[KEY_SIZE];
-    char *ptr = key;
-    char *end = ptr + KEY_SIZE;
-    char *filepath;
-    char *extension;
-    struct stat st;
+    char           full_path[MAX_PATH_LEN];
+    int            len;
+    char          *filepath;
+    char          *extension;
+    struct stat    st;
 
     inotifytools_snprintf(full_path, MAX_PATH_LEN, event, "%w%f");
     len = strlen(full_path);
@@ -412,26 +363,23 @@ static int file_ev_handler(struct inotify_event *event) {
     }
 
     if (event->mask & IN_DELETE || event->mask & IN_MOVED_FROM) {
-        md5(hash, (unsigned char*)filepath, strlen(filepath));
-        ptr = key;
-        for (i = 0; i < 16; ++i) {
-            ptr += snprintf(ptr, end - ptr, "%02x", hash[i]);
+        DEBUG_LOG("%s deleted", filepath);
+
+        if (file_event_plugins(ACTION_DEL, filepath, NULL) < 0) {
+            ERROR_LOG("file_event_plugins failed");
         }
 
-        /* Delete event don't need stat structure */
-        submit_event_post(ACTION_DEL, filepath, key, NULL);
-
-        DEBUG_LOG("%s deleted", filepath);
-        printf("%s deleted\n", filepath);
     } else if (event->mask & IN_CREATE) {
         /* do nothing, just log */
         DEBUG_LOG("%s created", filepath);
-        printf("%s created\n", filepath);
+
     } else if (event->mask & (
                 IN_CLOSE_WRITE  |
                 IN_MOVED_TO     | 
                 IN_ATTRIB
                 )) {
+        DEBUG_LOG("%s modified or created", filepath);
+
         if (stat(full_path, &st) != 0) {
             ERROR_LOG("stat %s failed: %s", full_path, strerror(errno));
             fprintf(stderr, "stat %s failed: %s\n", full_path, 
@@ -439,26 +387,22 @@ static int file_ev_handler(struct inotify_event *event) {
             return -1;
         }
 
-        md5(hash, (unsigned char*)filepath, strlen(filepath));
-        ptr = key;
-        for (i = 0; i < 16; ++i) {
-            ptr += snprintf(ptr, end - ptr, "%02x", hash[i]);
-        }   
 
-        submit_event_post(ACTION_ADD_OR_MOD, filepath, key, &st);
-        DEBUG_LOG("%s modified or created", filepath);
-        printf("%s modified or created\n", filepath);
+        if (file_event_plugins(ACTION_ADD_OR_MOD, filepath, &st) < 0) {
+            ERROR_LOG("file_event_plugins failed");
+        }
+
     } else {
         WARNING_LOG("%s failed", filepath);
         fprintf(stderr, "%s failed\n", filepath);
-        /* Never get here */
+        /* never get here */
         return -1;
     }
     return 0;
 }
 
 
-int moni(char *monidir) {
+static int moni(char *monidir) {
     struct inotify_event *event;
 
     if (exclude[0]) {
@@ -480,9 +424,11 @@ int moni(char *monidir) {
 
     inotifytools_set_printf_timefmt("%F %T");
 
-    submit_ftw();
+    start_ftw();
 
-    /* Now wait till we get a event. */
+    /*
+     * now wait till we get a event
+     */ 
     do {
         event = inotifytools_next_event(-1);
         if (!event) {
@@ -502,7 +448,7 @@ int moni(char *monidir) {
         }
     } while (1);
 
-    /* Never get here. */
+    /* never get here. */
     return -1;
 }
 
@@ -530,14 +476,10 @@ static int init_hostname() {
 
 static int ftw_cb(const char *fpath, const struct stat *st,
         int tflag, struct FTW *ftwbuf) {
-    int i = 0;
-    struct timespec ts;
-    char key[KEY_SIZE];
-    char *ptr = key;
-    char *end = ptr + KEY_SIZE;
-    char *filepath;
-    char *extension = NULL;
-    unsigned char hash[16];
+    int                 i = 0;
+    struct timespec     ts;
+    char                *filepath;
+    char                *extension = NULL;
 
     if (tflag == FTW_D) {
         for (i = 0; exclude[i]; ++i) {
@@ -551,7 +493,7 @@ static int ftw_cb(const char *fpath, const struct stat *st,
     if (tflag == FTW_SL) {
         struct stat st;
         if (stat(fpath, &st) < 0) {
-            fprintf(stderr, "stat %s failed:%s\n", fpath, strerror(errno));
+            ERROR_LOG("stat %s failed:%s", fpath, strerror(errno));
         } else if (S_ISREG(st.st_mode)) {
             goto conti;
         } else if (S_ISDIR(st.st_mode)) {
@@ -564,7 +506,7 @@ conti:
 
     if (global_conf.valid_exten) {
         if ((extension = strrchr(fpath, '.')) == NULL) {
-            printf("No extension:%s\n", fpath);
+            ERROR_LOG("No extension:%s", fpath);
             return 0;
         }
         ++extension;
@@ -576,8 +518,6 @@ conti:
     if (!(filepath = strstr(fpath, global_conf.moni_dir))) {
         ERROR_LOG("Invalid file path:fpath=%s, moni_dir=%s", 
                 fpath, global_conf.moni_dir);
-        fprintf(stderr, "Invalid file path:fpath=%s, moni_dir=%s\n", 
-                fpath, global_conf.moni_dir);
         return 0;
     }
 
@@ -586,14 +526,10 @@ conti:
         ++filepath;
     }
 
-    md5(hash, (unsigned char*)filepath, strlen(filepath));
-    for (i = 0; i < 16; ++i) {
-        ptr += snprintf(ptr, end - ptr, "%02x", hash[i]);
+    if (file_ftw_plugins(filepath, st) < 0) {
+        ERROR_LOG("file_ftw_plugins failed: %s", filepath);
+        return 0;
     }
-
-    DEBUG_LOG("File: %s, MD5: %s, SIZE: %lu", filepath, key, st->st_size);
-
-    submit_ftw_post(filepath, key, st);
 
     ts.tv_sec = 0;
     ts.tv_nsec = 100;
@@ -602,73 +538,48 @@ conti:
 }
 
 
-static void filmond_ftw(void *arg) {
+static void *filmond_ftw(void *arg) {
     int flags = FTW_ACTIONRETVAL | FTW_PHYS;
 
-    /* Submit all files to server. */
+    /*
+     * traverse all files in monitored directory
+     */
     if (nftw(global_conf.moni_dir, ftw_cb, 20, flags) != 0) {
-        fprintf(stderr, "nftw failed:%s\n", strerror(errno));
         ERROR_LOG("nftw failed:%s", strerror(errno));
+        return NULL;
     }
 
-    if (count > 0) {
-        submit_file(ACTION_ADD_OR_MOD, files_json);
-        json_object_put(files_json);
-        files_json = NULL;
+    if (ftw_post_plugins() < 0) {
+        ERROR_LOG("ftw_post_plugins failed");
     }
+
+    return NULL;
 }
 
 
 static struct option long_options[] = {
-    {"moni-dir", required_argument, NULL, 'd'},
-    {"exclude", required_argument, NULL, 'e'},
-    {"valid-exten", required_argument, NULL, 'a'},
-    {"report-addr", required_argument, NULL, 'r'},
-    {"report-host", required_argument, NULL, 'h'},
-    {"thread-stack", required_argument, NULL, 's'},
-    {"log-dir", required_argument, NULL, 'i'},
-    {"log-name", required_argument, NULL, 'f'},
-    {"log-level", required_argument, NULL, 'l'},
-    {"log-size", required_argument, NULL, 'z'},
-    {"log-num", required_argument, NULL, 'n'},
-    {"log-multi", required_argument, NULL, 'm'},
     {"config", required_argument, NULL, 'c'},
-    {"verbose", no_argument, NULL, 'v'},
-    {"version", 0, NULL, 'V'},
-    {"help", 0, NULL, 'H'},
+    {"version", 0, NULL, 'v'},
+    {"help", 0, NULL, 'h'},
 };
 
 
 static void filmond_usage() {
-    printf("usage: filmond [--config=conf_file|--help|--version|OPTIONS]"
-            " [--verbose]\n");
-    printf("\nOPTIONS:\n");
-    printf("  --moni-dir|-d       directory to monitor\n");
-    printf("  --exclude|-e        exclude directory\n");
-    printf("  --valid-exten|-a    valid externsion\n"); 
-    printf("  --report-addr|-r    file list server address\n");
-    printf("  --report-host|-h    file list server host\n");
-    printf("  --thread-stack|-s   stack size of a thread\n");
-    printf("  --log-dir|-i        log directory\n");
-    printf("  --log-name|-f       log file name\n");
-    printf("  --log-level|-l      log level\n");
-    printf("  --log-size|-z       log file size\n");
-    printf("  --log-num|-n        count of log file\n");
-    printf("  --log-multi|-m      multi or single file name\n");
-    printf("  --config|-c         use config file instead of OPTIONS\n");
-    printf("  --verbose|-v        verbose mode\n");
-    printf("  --version|-V        print version information\n");
-    printf("  --help|-H           print help information\n");
-
+    printf("usage: filmond --config=conf_file|--help|--version\n\n"
+           "  --config  |-c        config file instead of OPTIONS\n"
+           "  --version |-v        print version information\n"
+           "  --help    |-h        print help information\n");
     printf("%s\n", FILMOND_COPYRIGHT);
 }
 
 
 #ifdef DEBUG
-void rlimit_reset() {
+static void rlimit_reset() {
     struct rlimit rlim;
 
-    /* Alow core dump */
+    /*
+     * allow core dump
+     */
     rlim.rlim_cur = 1 << 29;
     rlim.rlim_max = 1 << 29;
     setrlimit(RLIMIT_CORE, &rlim);
@@ -676,7 +587,8 @@ void rlimit_reset() {
 #endif /* DEBUG */
 
 
-void sig_handler(int signo) {
+static void sig_handler(int signo) {
+    /* TODO */
     FATAL_LOG("Receive signo:%d", signo);
     exit(111);
 }
@@ -692,7 +604,7 @@ static void set_sig_handlers() {
 
     if (r == -1) {
         fprintf(stderr, "sigemptyset() failed:%s\n", strerror(errno));
-        exit(111);
+        exit(1);
     }
 
     sigaction(SIGPIPE, &sa, 0); 
@@ -705,11 +617,10 @@ static void set_sig_handlers() {
 
 
 int main(int argc, char **argv) {
-    int c, ret;
-    char *conf_file = NULL;
-    config_t g_conf;
-    int verbose = 0;
-    char header_buf[128];
+    char    *conf_file = NULL;
+    int      c;
+    int      ret;
+    conf_t   g_conf = {};
     
 #ifdef DEBUG
     rlimit_reset();
@@ -717,59 +628,22 @@ int main(int argc, char **argv) {
 
     set_sig_handlers();
 
-    while ((c = getopt_long(argc, argv, "d:e:a:r:h:s:i:f:l:z:n:m:c:vVH", 
-                long_options, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "c:vh", long_options, NULL)) != -1) {
         switch (c) {
-        case 'm':
-            global_conf.log_multi = atoi(optarg);
-            break;
-        case 'n':
-            global_conf.log_num = atoi(optarg);
-            break;
-        case 'z':
-            global_conf.log_size = atoi(optarg);
-            break;
-        case 'l':
-            global_conf.log_level = atoi(optarg);
-            break;
-        case 'i':
-            global_conf.log_dir = optarg;
-            break;
-        case 'f':
-            global_conf.log_name = optarg;
-            break;
-        case 's':
-            global_conf.thread_stack = atoi(optarg);
-            break;
-        case 'V':
+        case 'v':
             printf("filmond: %s, compiled at %s %s\n", 
                    FILMOND_VERSION, __DATE__, __TIME__);
             printf("%s\n", FILMOND_COPYRIGHT);
             exit(0);
-        case 'H':
+        case 'h':
             filmond_usage();
             exit(0);
-        case 'v':
-            verbose = 1;
-            break;
         case 'c':
             conf_file = optarg;
             break;
-        case 'd':
-            global_conf.moni_dir = optarg;
-            break;
-        case 'e':
-            global_conf.exclude = optarg;
-            break;
-        case 'a':
-            global_conf.valid_exten = optarg;
-            break;
-        case 'r':
-            global_conf.report_addr = optarg;
-            break;
-        case 'h':
-            global_conf.report_host = optarg;
-            break;
+        default:
+            filmond_usage();
+            exit(1);
         }
     }
 
@@ -778,69 +652,49 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    /* Parse conf file. */
+    /*
+     * parse conf file.
+     */
     if (conf_file) {
-        ret = config_init(&g_conf, conf_file);
+        ret = conf_init(&g_conf, conf_file);
         if (ret != 0) {
-            boot_notify(-1, "Load conf file %s", conf_file);
+            boot_notify(-1, "Load conf file \"%s\"", conf_file);
             exit(1);
         }
 
-        global_conf.moni_dir = config_get_str_value(&g_conf, 
+        global_conf.plugin_dir = conf_get_str_value(&g_conf, 
+            "plugin_dir", ".");
+        global_conf.moni_dir = conf_get_str_value(&g_conf, 
             "moni_dir", "/usr/local/apache2/htdocs");
-        global_conf.exclude = config_get_str_value(&g_conf,
+        global_conf.exclude = conf_get_str_value(&g_conf,
             "exclude", NULL);
-        global_conf.valid_exten = config_get_str_value(&g_conf, 
+        global_conf.valid_exten = conf_get_str_value(&g_conf, 
             "valid_exten", NULL);
-        global_conf.report_addr = config_get_str_value(&g_conf, 
-            "report_addr", NULL);
-        global_conf.report_host = config_get_str_value(&g_conf, 
-            "report_host", NULL);
-        global_conf.thread_stack =
-            config_get_int_value(&g_conf, "thread_stack", 1048576);
-        global_conf.log_dir = config_get_str_value(&g_conf, "log_dir", ".");
-        global_conf.log_name = config_get_str_value(&g_conf, "log_name", 
+        global_conf.log_dir = conf_get_str_value(&g_conf, "log_dir", ".");
+        global_conf.log_name = conf_get_str_value(&g_conf, "log_name", 
             "filmond.log");
-        global_conf.log_level = config_get_int_value(&g_conf, 
+        global_conf.log_level = conf_get_int_value(&g_conf, 
             "log_level", LOG_LEVEL_ALL);
-        global_conf.log_size = config_get_int_value(&g_conf, 
+        global_conf.log_size = conf_get_int_value(&g_conf, 
             "log_size", LOG_FILE_SIZE);
-        global_conf.log_num = config_get_int_value(&g_conf, 
+        global_conf.log_num = conf_get_int_value(&g_conf, 
             "log_num", LOG_FILE_NUM),
-        global_conf.log_multi = config_get_int_value(&g_conf, 
+        global_conf.log_multi = conf_get_int_value(&g_conf, 
             "log_multi", LOG_MULTI_NO);
+
+        if (load_plugins(&g_conf) < 0) {
+            boot_notify(-1, "NO config file specified");
+            exit(1);
+        }
+
+        if (plugin_vec.count == 0) {
+            boot_notify(-1, "NO filmond plugin loaded");
+            exit(1);
+        }
     } else {
-        if (!global_conf.moni_dir) {
-            global_conf.moni_dir = "/usr/local/apache2/htdocs";
-        }
-
-        if (!global_conf.thread_stack) {
-            global_conf.thread_stack = 1048576;
-        }
-
-        if (!global_conf.log_dir) {
-            global_conf.log_dir = ".";
-        }
-
-        if (!global_conf.log_name) {
-            global_conf.log_name = "filmond.log";
-        }
-
-        if (!global_conf.log_level) {
-            global_conf.log_level = LOG_LEVEL_ALL;
-        }
-
-        if (!global_conf.log_size) {
-            global_conf.log_size = LOG_FILE_SIZE;
-        }
-
-        if (!global_conf.log_num) {
-            global_conf.log_num = LOG_FILE_NUM;
-        }
-        
-        if (!global_conf.log_multi) {
-            global_conf.log_multi = LOG_MULTI_NO;
-        }
+        boot_notify(-1, "NO config file specified");
+        filmond_usage();
+        exit(1);
     }
 
     if (global_conf.valid_exten) {
@@ -860,67 +714,32 @@ int main(int argc, char **argv) {
             global_conf.log_size,
             global_conf.log_num,
             global_conf.log_multi);
+    
     if (ret != 0) {
         boot_notify(-1, "Initialize log file");
         exit(1);
     }
 
-    if (!global_conf.report_addr) {
-        boot_notify(-1, "No report address");
-        exit(1);
-    }
-
-    if (global_conf.report_host) {
-        snprintf(header_buf, 128, "Host: %s", global_conf.report_host);
-        list = curl_slist_append(list, header_buf);
-    }
-
-    list = curl_slist_append(list, "Content-Type: application/json");
-
     if (init_hostname() != 0) {
         fprintf(stderr, "%s\n", strerror(errno));
-        boot_notify(-1, "Get hostname");
+        boot_notify(-1, "Get hostname failed: %s", strerror(errno));
         exit(1);
     }
 
-    snprintf(add_uri, URI_LIMIT, "%s?host=%s&action=add", 
-        global_conf.report_addr, g_hostname);
-
-    snprintf(delete_uri, URI_LIMIT, "%s?host=%s&action=delete", 
-        global_conf.report_addr, g_hostname);
-
-    if (curl_global_init(CURL_GLOBAL_ALL) != 0) {
-        fprintf(stderr, "curl_global_init failed:\n");
-        boot_notify(-1, "Initialize curl");
+    if (init_plugins(&g_conf) < 0) {
+        boot_notify(-1, "Load filmond plugins");
         exit(1);
     }
-
-    if (!verbose) {
-        int fd;
-        if ((fd = open("/dev/null", O_WRONLY)) < 0) {
-            boot_notify(-1, "Open /dev/null");
-            exit(1);
-        }
-
-        if (dup2(fd, STDOUT_FILENO) < 0) {
-            boot_notify(-1, "Dup STDOUT to /dev/null");
-            exit(1);
-        }
-    }
-
-    /*
-     * To promise FIFO of submitting, I just create one thread in the pool.
-     */ 
-    g_pool = threadpool_create(1, 1, global_conf.thread_stack);
-    assert(g_pool);
 
     if (moni(global_conf.moni_dir) != 0) {
         FATAL_LOG("filmond exit abnormally");
         fprintf(stderr, "filmond exit abnormally\n");
     }
 
-    curl_slist_free_all(list);
-    curl_global_cleanup();
-    FATAL_LOG("Should never get here!");
-    exit(1);
+
+    deinit_plugins(&g_conf);
+
+    unload_plugins();
+
+    exit(0);
 }
