@@ -204,6 +204,7 @@ void log_write(int level, const char *fmt, ...) {
         if (log_buffer == MAP_FAILED) {
             fprintf(stderr, "mmap log buffer failed: %s\n", 
                 strerror(errno));
+            return;
         }
     }
 
@@ -218,7 +219,12 @@ void log_write(int level, const char *fmt, ...) {
     va_start(ap, fmt);
     end = vsnprintf(log_buffer + pos, LOG_BUFFER_SIZE - pos, fmt, ap);
     va_end(ap);
-    log_buffer[end + pos] = '\n';
+
+    if (end < LOG_BUFFER_SIZE - pos) {
+        log_buffer[end + pos] = '\n';
+    } else {
+        log_buffer[LOG_BUFFER_SIZE - 2] = '\n';
+    }
 
     index = log_multi ? level : 0;
 

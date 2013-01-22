@@ -26,10 +26,10 @@ static char                delete_uri[URI_LIMIT];
 static int                 thread_stack;
 
 
-typedef struct task_item {
+typedef struct task_item_s {
     int             action;
     char           *post;
-} task_item;
+} task_item_t;
 
 
 static void add_fileinfo_json(char *filepath, const struct stat *st) {
@@ -114,7 +114,7 @@ static size_t curl_write_cb(char *ptr, size_t size,
 static void submit_file_info(void *arg) {
     CURL         *curl;
     json_object  *obj;
-    task_item    *item = (task_item *)arg;
+    task_item_t  *item = (task_item_t *)arg;
     char          response[RESPONSE_LIMIT] = {}; /* Must clear data with '0' */
     CURLcode      res;
     long          rc = 0;
@@ -201,10 +201,10 @@ end:
 
 
 static void submit_file(char action, json_object *obj) {
-    task_item *item;
+    task_item_t     *item;
 
     /* The allocated memory freed in submit_file_info(). */
-    item = (task_item*)malloc(sizeof(*item));
+    item = (task_item_t *)malloc(sizeof(*item));
     if (!item) {
         fprintf(stderr, "Out of memory\n");
         ERROR_LOG("Out of memory");
