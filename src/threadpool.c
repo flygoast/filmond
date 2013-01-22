@@ -103,7 +103,7 @@ static void threadpool_free_task_queue(threadpool_t *pool) {
 threadpool_t *threadpool_create(int init, int max, int stack_size) {
     threadpool_t *pool;
     int i;
-    assert(init > 0 && max > init && stack_size >= 0);
+    assert(init > 0 && max >= init && stack_size >= 0);
 
     /* Allocate memory and zero all them. */
     pool = (threadpool_t *)calloc(1, sizeof(*pool));
