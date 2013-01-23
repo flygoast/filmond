@@ -19,7 +19,7 @@ static mode_t    dir_target_mode;
 
 static int chmod_path(const char *path, const struct stat *st) {
     if (S_ISDIR(st->st_mode)) {
-        if (dir_origin_mode == 0) {
+        if (dir_origin_mode == -1) {
             /*
              * just care for 'rwx' permissions
              */
@@ -40,7 +40,7 @@ static int chmod_path(const char *path, const struct stat *st) {
             }
         }
     } else {
-        if (file_origin_mode == 0) {
+        if (file_origin_mode == -1) {
             /*
              * just care for 'rwx' permissions
              */
@@ -132,9 +132,9 @@ int plugin_dir_event(int action, char *dirpath, char *moved_from) {
 int plugin_init(conf_t *conf) {
     moni_dir = conf_get_str_value(conf, "moni_dir", 
         "/usr/local/apache2/htdocs");
-    file_origin_mode = conf_get_int_value(conf, "file_origin_mode", 0);
+    file_origin_mode = conf_get_int_value(conf, "file_origin_mode", -1);
     file_target_mode = conf_get_int_value(conf, "file_target_mode", 0644);
-    dir_origin_mode = conf_get_int_value(conf, "dir_origin_mode", 0);
+    dir_origin_mode = conf_get_int_value(conf, "dir_origin_mode", -1);
     dir_target_mode = conf_get_int_value(conf, "dir_target_mode", 0755);
 
     return FILMOND_DECLINED;
