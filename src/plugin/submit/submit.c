@@ -1,5 +1,6 @@
 #include <string.h>
 #include <pwd.h>
+#include <errno.h>
 #include "plugin.h"
 #include "md5.h"
 #include "log.h"
@@ -15,10 +16,14 @@
 #define BUF_SIZE            1024
 #define MIN(a, b)           ((a) < (b) ? (a) : (b))
 
+#define ACTION_ADD_OR_MOD   'a'
+#define ACTION_DEL          'd'
+
 static struct curl_slist  *list;
 static json_object        *files_json;
 static char               *submit_addr;
 static char               *submit_host;
+static char               *moni_dir;
 static threadpool_t       *g_pool;
 static int                 count;
 static char                add_uri[URI_LIMIT];
@@ -231,12 +236,12 @@ static void submit_file(char action, json_object *obj) {
 }
 
 
-int plugin_file_ftw(char *filepath, const struct stat *st) {
+int plugin_file_ftw(const char *filepath, const struct stat *st) {
     if (files_json == NULL) {
         files_json = json_object_new_object();
     }
 
-    add_fileinfo_json(files_json, filepath, st);
+    add_fileinfo_json(files_json, (char *)filepath, st);
 
     if (++count >= 30) {
         submit_file(ACTION_ADD_OR_MOD, files_json);
@@ -249,18 +254,56 @@ int plugin_file_ftw(char *filepath, const struct stat *st) {
 }
 
 
-int plugin_file_event(int action, char *filepath, const struct stat *st) {
-    json_object *files_obj = json_object_new_object();
+/*
+ * moved_from is valid only when action is ACTION_FILE_MOVE
+ */
+int plugin_file_event(int action, char *filepath, char *moved_from) {
+    struct stat      st;
+    json_object     *files_obj;
+    char            *path;
+    
+    switch (action) {
+    case ACTION_FILE_ATTRIB:
+    case ACTION_FILE_MODIFY:
+        path = filepath + strlen(moni_dir);
+        if (*path == '/') {
+            ++path;
+        }
 
-    if (action == ACTION_DEL) {
-        add_fileinfo_json(files_obj, filepath, NULL);
-        submit_file(ACTION_DEL, files_obj);
-    } else if (action == ACTION_ADD_OR_MOD) {
-        add_fileinfo_json(files_obj, filepath, st);
+        if (stat(filepath, &st) < 0) {
+            ERROR_LOG("stat %s failed:%s", filepath, strerror(errno));
+            return FILMOND_DECLINED;
+        }
+
+        files_obj = json_object_new_object();
+        add_fileinfo_json(files_obj, path, &st);
         submit_file(ACTION_ADD_OR_MOD, files_obj);
-    }
+        json_object_put(files_obj);
+        break;
 
-    json_object_put(files_obj);
+    case ACTION_FILE_MOVE:
+        path = moved_from + strlen(moni_dir);
+        if (*path == '/') {
+            ++path;
+        }
+
+        files_obj = json_object_new_object();
+        add_fileinfo_json(files_obj, path, NULL);
+        submit_file(ACTION_DEL, files_obj);
+        json_object_put(files_obj);
+        break;
+
+    case ACTION_FILE_DELETE:
+        path = filepath + strlen(moni_dir);
+        if (*path == '/') {
+            ++path;
+        }
+
+        add_fileinfo_json(files_obj, path, NULL);
+        submit_file(ACTION_DEL, files_obj);
+        json_object_put(files_obj);
+        break;
+    }
 
     return FILMOND_DECLINED;
 }
@@ -269,6 +312,8 @@ int plugin_file_event(int action, char *filepath, const struct stat *st) {
 int plugin_init(conf_t *conf) {
     char header_buf[128];
 
+    moni_dir = conf_get_str_value(conf, "moni_dir",
+        "/usr/local/apache2/htdocs");
     submit_addr = conf_get_str_value(conf, "submit_addr", NULL);
     submit_host = conf_get_str_value(conf, "submit_host", NULL);
     thread_stack = conf_get_int_value(conf, "thread_stack", 1048576);

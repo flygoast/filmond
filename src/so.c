@@ -25,7 +25,7 @@ int load_so(void **phandle, symbol_t *sym, const char *filename) {
     
     *phandle = dlopen(filename, RTLD_NOW);
     if ((error = dlerror()) != NULL) {
-        ERROR_LOG("dlopen so file %s failed:%s", filename, error);
+        boot_notify(-1, "dlopen:%s", error);
         return rc;
     }
 

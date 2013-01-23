@@ -38,13 +38,19 @@
     IN_DONT_FOLLOW          |\
     IN_ONLYDIR              )
 
+#define EVENT_DIR           0
+#define EVENT_FILE          1 
 
-char            *g_hostname;
-static char     *exten[30];
-static char     *exclude[30];
-static int       g_hostname_size;
-static vector_t  plugin_vec;
 
+char                   *g_hostname;
+static char            *exten[30];
+static char            *exclude[30];
+static int              g_hostname_size;
+static vector_t         plugin_vec;
+static volatile int     stop;
+static char             moved_from[MAX_PATH_LEN];
+static int              event_type;
+static int              timeout;
 
 struct global_conf_st {
     char    *plugin_dir;
@@ -62,10 +68,12 @@ struct global_conf_st {
 
 typedef struct so_func_s {
     int (*plugin_init)(conf_t *conf);
-    int (*plugin_file_ftw)(char *filepath, const struct stat *st);
-    int (*plugin_file_event)(int action, char *filepath, const struct stat *st);
-    int (*plugin_deinit)(conf_t *conf);
+    int (*plugin_dir_ftw)(const char *dirpath, const struct stat *st);
+    int (*plugin_file_ftw)(const char *filepath, const struct stat *st);
     int (*plugin_ftw_post)();
+    int (*plugin_dir_event)(int action, char *dirpath, char *moved_from);
+    int (*plugin_file_event)(int action, char *filepath, char *moved_from);
+    int (*plugin_deinit)(conf_t *conf);
 } so_func_t;
 
 
@@ -85,7 +93,9 @@ static int load_filmond_plugin(void *key, void *value, void *userptr) {
     char                fullpath[PATH_MAX];
     symbol_t            syms[] = {
         { "plugin_init",       (void **)&plugin.func.plugin_init,       1 },
+        { "plugin_dir_ftw",    (void **)&plugin.func.plugin_dir_ftw,    1 },
         { "plugin_file_ftw",   (void **)&plugin.func.plugin_file_ftw,   1 },
+        { "plugin_dir_event",  (void **)&plugin.func.plugin_dir_event,  1 },
         { "plugin_file_event", (void **)&plugin.func.plugin_file_event, 1 },
         { "plugin_deinit",     (void **)&plugin.func.plugin_deinit,     1 },
         { "plugin_ftw_post",   (void **)&plugin.func.plugin_ftw_post,   1 },
@@ -214,8 +224,35 @@ static int file_ftw_plugins(char *filepath, const struct stat *st) {
 }
 
 
-static int file_event_plugins(int action, char *filepath, 
-        const struct stat *st) {
+static int dir_ftw_plugins(const char *dirpath, const struct stat *st) {
+    filmond_plugin_t    *plugin;
+    int                  i;
+    int                  ret;
+
+    for (i = plugin_vec.count - 1; i >= 0; --i) {
+
+        plugin = vector_get_at(&plugin_vec, i);
+
+        if (plugin->func.plugin_dir_ftw == NULL) {
+            continue;
+        }
+
+        ret = plugin->func.plugin_dir_ftw(dirpath, st);
+
+        if (ret == FILMOND_DECLINED) {
+            continue;
+        } else if (ret == FILMOND_DONE) {
+            break;
+        } else if (ret == FILMOND_ERROR) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+
+static int file_event_plugins(int action, char *filepath, char *moved_from) {
     filmond_plugin_t    *plugin;
     int                  i;
     int                  ret;
@@ -228,7 +265,35 @@ static int file_event_plugins(int action, char *filepath,
             continue;
         }
 
-        ret = plugin->func.plugin_file_event(action, filepath, st);
+        ret = plugin->func.plugin_file_event(action, filepath, moved_from);
+
+        if (ret == FILMOND_DECLINED) {
+            continue;
+        } else if (ret == FILMOND_DONE) {
+            break;
+        } else if (ret == FILMOND_ERROR) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+
+static int dir_event_plugins(int action, char *dirpath, char *moved_from) { 
+    filmond_plugin_t    *plugin;
+    int                  i;
+    int                  ret;
+
+    for (i = plugin_vec.count - 1; i >= 0; --i) {
+
+        plugin = vector_get_at(&plugin_vec, i);
+
+        if (plugin->func.plugin_dir_event == NULL) {
+            continue;
+        }
+
+        ret = plugin->func.plugin_dir_event(action, dirpath, moved_from);
 
         if (ret == FILMOND_DECLINED) {
             continue;
@@ -301,128 +366,220 @@ static int ext_is_valid(char *extension) {
 }
 
 
-static int dir_ev_handler(struct inotify_event *event) {
-    char full_path[MAX_PATH_LEN];
-    static char moved_from[MAX_PATH_LEN] = {};
+static int timeout_handler() {
 
-    inotifytools_snprintf(full_path, MAX_PATH_LEN, event, "%w%f");
+    timeout = -1;
 
-    if (event->mask & IN_CREATE) {
-        /* Monitor the new directory created or moved to here. */
-        if (!inotifytools_watch_recursively(full_path, MONI_EVENTS)) {
-            ERROR_LOG("Add watch to directory '%s' failed", full_path);
-            fprintf(stderr, "Add watch to directory '%s' failed\n", full_path);
-            return -1;
-        }
-        DEBUG_LOG("Add watch to directory '%s'", full_path);
-        printf("Add watch to directory '%s'\n", full_path);
-    } else if (event->mask & IN_MOVED_TO) {
-        if (moved_from[0] != '\0') {
-            inotifytools_replace_filename(moved_from, full_path);
-            memset(moved_from, 0, sizeof(moved_from));
-            DEBUG_LOG("Move directory from '%s' to '%s'", 
-                moved_from, full_path);
-            printf("Move directory from '%s' to '%s'\n", 
-                moved_from, full_path);
-        } else {
-            if (!inotifytools_watch_recursively(full_path, MONI_EVENTS)) {
-                ERROR_LOG("Add watch to directory '%s' failed", full_path);
-                fprintf(stderr, "Add watch to directory '%s' failed\n", 
-                        full_path);
+    /*
+     * If we last had MOVED_FROM and don't currently have MOVED_TO,
+     * moved_from file must have been moved outside of tree, so
+     * convert event to DELETE.
+     */
+    if (moved_from[0] != '\0') {
+        if (event_type == EVENT_DIR) {
+            if (!inotifytools_remove_watch_by_filename(moved_from)) {
+                ERROR_LOG("Remove watch directory '%s' failed", moved_from);
                 return -1;
             }
-            DEBUG_LOG("Directory '%s' was moved here", full_path);
-            printf("Directory '%s' was moved here\n", full_path);
+        
+            if (dir_event_plugins(ACTION_DIR_DELETE, moved_from, NULL) < 0) {
+                ERROR_LOG("dir_event_plugins(DELETE, \"%s\") failed", 
+                    moved_from);
+                return -1;
+            }
+
+
+        } else {
+             if (file_event_plugins(ACTION_FILE_DELETE, moved_from, NULL) < 0) {
+                ERROR_LOG("FILE_DELETE(\"%s\") failed", moved_from);
+                return -1;
+            }
         }
-    } else if (event->mask & IN_DELETE) {
-        if (!inotifytools_remove_watch_by_filename(full_path)) {
-            ERROR_LOG("Remove watch from directory '%s' failed", full_path);
-            fprintf(stderr, "Remove watch from directory '%s' failed\n", 
-                    full_path);
-            return -1;
-        }
-        DEBUG_LOG("Directory '%s' was removed", full_path);
-        printf("Directory '%s' was removed\n", full_path);
-    } else if (event->mask & IN_MOVED_FROM) {
-        strcpy(moved_from, full_path);
-        if (!inotifytools_remove_watch_by_filename(full_path)) {
-            memset(moved_from, 0, sizeof(moved_from));
-            ERROR_LOG("Remove watch from directory '%s' failed", full_path);
-            fprintf(stderr, "Remove watch from directory '%s' failed\n", 
-                    full_path);
-            return -1;
-        }
+
+        moved_from[0] = '\0';
     }
 
     return 0;
 }
 
 
-static int file_ev_handler(struct inotify_event *event) {
+static int event_handler(struct inotify_event *event) {
     char           full_path[MAX_PATH_LEN];
-    int            len;
-    char          *filepath;
-    char          *extension;
-    struct stat    st;
+
+    timeout = -1;
+
+    /*
+     * If we last had MOVED_FROM and don't currently have MOVED_TO,
+     * moved_from file must have been moved outside of tree, so
+     * convert event to DELETE.
+     */
+    if (moved_from[0] != '\0' && !(event->mask & IN_MOVED_TO)) {
+
+        if (event->mask & IN_ISDIR) {
+            if (!inotifytools_remove_watch_by_filename(moved_from)) {
+                ERROR_LOG("Remove watch directory '%s' failed", moved_from);
+            }
+        
+            if (dir_event_plugins(ACTION_DIR_DELETE, moved_from, NULL) < 0) {
+                ERROR_LOG("DIR_DELETE(\"%s\") failed", moved_from);
+            }
+
+        } else {
+            if (file_event_plugins(ACTION_FILE_DELETE, moved_from, NULL) < 0) {
+                ERROR_LOG("FILE_DELETE(\"%s\") failed", moved_from);
+            }
+        }
+
+        moved_from[0] = '\0';
+    }
 
     inotifytools_snprintf(full_path, MAX_PATH_LEN, event, "%w%f");
-    len = strlen(full_path);
-    if (full_path[len - 1] == '/') {
-        /* Filter the directory names. */
-        return 0;
-    }
 
-    if (global_conf.valid_exten) {
-        if ((extension = strrchr(full_path, '.')) == NULL) {
+    if (!(event->mask & IN_ISDIR)) {
+        int            len;
+        char          *extension;
+
+        len = strlen(full_path);
+        if (full_path[len - 1] == '/') {
+            /* Filter the directory names. */
             return 0;
         }
-        ++extension;
-        if (!ext_is_valid(extension)) {
-            return 0; /* skip invalid extensions */
+    
+        if (global_conf.valid_exten) {
+            if ((extension = strrchr(full_path, '.')) == NULL) {
+                return 0;
+            }
+            ++extension;
+            if (!ext_is_valid(extension)) {
+                return 0; /* skip invalid extensions */
+            }
         }
     }
 
-    filepath = full_path + strlen(global_conf.moni_dir);
-    if (*filepath == '/') {
-        ++filepath;
+    if (event->mask & IN_CREATE) {
+
+        if (event->mask & IN_ISDIR) {
+
+            if (!inotifytools_watch_recursively(full_path, MONI_EVENTS)) {
+                ERROR_LOG("Add watch to directory '%s' failed", full_path);
+                return -1;
+            }
+
+            DEBUG_LOG("Add watch to directory '%s'", full_path);
+
+            if (dir_event_plugins(ACTION_DIR_CREATE, full_path, NULL) < 0) {
+                ERROR_LOG("DIR_CREATE(\"%s\") failed", full_path);
+                return -1;
+            }
+        } else {
+            if (file_event_plugins(ACTION_FILE_CREATE, full_path, NULL) < 0) {
+                ERROR_LOG("FILE_CREATE(\"%s\") failed", full_path);
+                return -1;
+            }
+        }
+    } else if (event->mask & IN_MOVED_TO) {
+        if (moved_from[0] != '\0') {
+            if (event->mask & IN_ISDIR) {
+                inotifytools_replace_filename(moved_from, full_path);
+    
+                DEBUG_LOG("Move directory from '%s' to '%s'", 
+                    moved_from, full_path);
+    
+                if (dir_event_plugins(ACTION_DIR_MOVE, full_path, 
+                        moved_from) < 0) {
+                    ERROR_LOG("DIR_MOVE(\"%s\"<-\"%s\") failed", full_path,
+                        moved_from);
+                    return -1;
+                }
+            } else {
+                if (file_event_plugins(ACTION_FILE_MOVE, full_path, 
+                        moved_from) < 0) {
+                    ERROR_LOG("FILE_MOVE(\"%s\"<-\"%s\") failed", full_path, 
+                        moved_from);
+                    return -1;
+                }
+            }
+
+            moved_from[0] = '\0';
+
+        } else {
+            if (event->mask & IN_ISDIR) {
+                if (!inotifytools_watch_recursively(full_path, MONI_EVENTS)) {
+                    ERROR_LOG("Add watch to directory '%s' failed", full_path);
+                    return -1;
+                }
+    
+                DEBUG_LOG("Directory '%s' was moved here", full_path);
+    
+                if (dir_event_plugins(ACTION_DIR_CREATE, full_path, NULL) < 0) {
+                    ERROR_LOG("DIR_CREATE(\"%s\") failed", full_path);
+                    return -1;
+                }
+            } else {
+                if (file_event_plugins(ACTION_FILE_CREATE, full_path, 
+                        NULL) < 0) {
+                    ERROR_LOG("FILE_CREATE(\"%s\") failed", full_path);
+                    return -1;
+                }
+            }
+        }
+    } else if (event->mask & IN_DELETE) {
+        if (event->mask & IN_ISDIR) {
+            if (!inotifytools_remove_watch_by_filename(full_path)) {
+                ERROR_LOG("Remove watch directory '%s' failed", full_path);
+                return -1;
+            }
+    
+            DEBUG_LOG("Directory '%s' was removed", full_path);
+    
+            if (dir_event_plugins(ACTION_DIR_DELETE, full_path, NULL) < 0) {
+                ERROR_LOG("DIR_DELETE(\"%s\") failed", full_path);
+                return -1;
+            }
+        } else {
+            if (file_event_plugins(ACTION_FILE_DELETE, full_path, NULL) < 0) {
+                ERROR_LOG("FILE_DELETE(\"%s\") failed", full_path);
+                return -1;
+            }
+        }
+
+    } else if (event->mask & IN_MOVED_FROM) {
+        strncpy(moved_from, full_path, MAX_PATH_LEN);
+
+        if (event->mask & IN_ISDIR) {
+            event_type = EVENT_DIR;
+        } else {
+            event_type = EVENT_FILE;
+        }
+
+        timeout = 1;
+    } else if (event->mask & IN_ATTRIB) {
+        if (event->mask & IN_ISDIR) {
+            if (dir_event_plugins(ACTION_DIR_ATTRIB, full_path, NULL) < 0) {
+                ERROR_LOG("DIR_ATTRIB(\"%s\") failed", full_path);
+                return -1;
+            }
+        } else {
+            if (file_event_plugins(ACTION_FILE_ATTRIB, full_path, NULL) < 0) {
+                ERROR_LOG("FILE_ATTRIB(\"%s\") failed", full_path);
+                return -1;
+            }
+        }
+
+    } else if (event->mask & IN_CLOSE_WRITE) {
+        if (event->mask & IN_ISDIR) {
+            if (dir_event_plugins(ACTION_DIR_MODIFY, full_path, NULL) < 0) {
+                ERROR_LOG("DIR_MODIFY(\"%s\") failed", full_path);
+                return -1;
+            }
+        } else {
+            if (file_event_plugins(ACTION_FILE_MODIFY, full_path, NULL) < 0) {
+                ERROR_LOG("FILE_MODIFY(\"%s\") failed", full_path);
+                return -1;
+            }
+        }
     }
 
-    if (event->mask & IN_DELETE || event->mask & IN_MOVED_FROM) {
-        DEBUG_LOG("%s deleted", filepath);
-
-        if (file_event_plugins(ACTION_DEL, filepath, NULL) < 0) {
-            ERROR_LOG("file_event_plugins failed");
-        }
-
-    } else if (event->mask & IN_CREATE) {
-        /* do nothing, just log */
-        DEBUG_LOG("%s created", filepath);
-
-    } else if (event->mask & (
-                IN_CLOSE_WRITE  |
-                IN_MOVED_TO     | 
-                IN_ATTRIB
-                )) {
-        DEBUG_LOG("%s modified or created", filepath);
-
-        if (stat(full_path, &st) != 0) {
-            ERROR_LOG("stat %s failed: %s", full_path, strerror(errno));
-            fprintf(stderr, "stat %s failed: %s\n", full_path, 
-                    strerror(errno));
-            return -1;
-        }
-
-
-        if (file_event_plugins(ACTION_ADD_OR_MOD, filepath, &st) < 0) {
-            ERROR_LOG("file_event_plugins failed");
-        }
-
-    } else {
-        WARNING_LOG("%s failed", filepath);
-        fprintf(stderr, "%s failed\n", filepath);
-        /* never get here */
-        return -1;
-    }
     return 0;
 }
 
@@ -435,14 +592,12 @@ static int moni(char *monidir) {
                 || !inotifytools_watch_recursively_with_exclude(monidir, 
                     MONI_EVENTS, (char const **)exclude)) {
             ERROR_LOG("%s:%s", strerror(inotifytools_error()), monidir);
-            fprintf(stderr, "%s:%s\n", strerror(inotifytools_error()), monidir);
             return -1;
         }
     } else {
         if (!inotifytools_initialize() 
                 || !inotifytools_watch_recursively(monidir, MONI_EVENTS)) {
             ERROR_LOG("%s:%s", strerror(inotifytools_error()), monidir);
-            fprintf(stderr, "%s:%s\n", strerror(inotifytools_error()), monidir);
             return -1;
         }
     }
@@ -454,27 +609,45 @@ static int moni(char *monidir) {
     /*
      * now wait till we get a event
      */ 
+
+    timeout = -1;
+
     do {
-        event = inotifytools_next_event(-1);
+        event = inotifytools_next_event(timeout);
+
         if (!event) {
-            ERROR_LOG("%s", strerror(inotifytools_error()));
-            fprintf(stderr, "%s\n", strerror(inotifytools_error()));
+            if (!inotifytools_error()) {
+                timeout_handler();
+                continue;
+            }
+
+            if (inotifytools_error() != EINTR) {
+                ERROR_LOG("%s", strerror(inotifytools_error()));
+                continue;
+            }
+
             continue;
         }
 
-        if (event->mask & IN_ISDIR) {
-            if (dir_ev_handler(event) < 0) {
-                continue;
-            }
-        } else {
-            if (file_ev_handler(event) < 0) {
-                continue;
-            }
+        if (event->mask & IN_Q_OVERFLOW) {
+            ERROR_LOG("inotify overflow:%s", strerror(inotifytools_error()));
+            continue;
         }
-    } while (1);
 
-    /* never get here. */
-    return -1;
+        if (event->mask & IN_IGNORED) {
+            ERROR_LOG("inotify ignored:%s", strerror(inotifytools_error()));
+            continue;
+        }
+
+        if (event->len == 0) {
+            continue;
+        }
+
+        event_handler(event);
+
+    } while (!stop);
+
+    return 0;
 }
 
 
@@ -512,6 +685,12 @@ static int ftw_cb(const char *fpath, const struct stat *st,
                 return FTW_SKIP_SUBTREE;
             }
         }
+
+        if (dir_ftw_plugins(fpath, st) < 0) {
+            ERROR_LOG("dir_ftw_plugins failed: %s", fpath);
+            return FTW_CONTINUE;
+        }
+
         return FTW_CONTINUE; /* skip directory. */
     }
 
@@ -583,9 +762,10 @@ static void *filmond_ftw(void *arg) {
 
 
 static struct option long_options[] = {
-    {"config", required_argument, NULL, 'c'},
-    {"version", 0, NULL, 'v'},
-    {"help", 0, NULL, 'h'},
+    { "config",  required_argument, NULL, 'c' },
+    { "version", 0,                 NULL, 'v' },
+    { "help",    0,                 NULL, 'h' },
+    { NULL,      0,                 NULL, 0   },
 };
 
 
@@ -613,9 +793,9 @@ static void rlimit_reset() {
 
 
 static void sig_handler(int signo) {
-    /* TODO */
-    FATAL_LOG("Receive signo:%d", signo);
-    exit(111);
+    DEBUG_LOG("Receive signo:%d", signo);
+
+    stop = 1;
 }
 
 
@@ -628,7 +808,7 @@ static void set_sig_handlers() {
     r = sigemptyset(&sa.sa_mask);
 
     if (r == -1) {
-        fprintf(stderr, "sigemptyset() failed:%s\n", strerror(errno));
+        boot_notify(-1, "sigemptyset failed:%s\n", strerror(errno));
         exit(1);
     }
 
@@ -746,7 +926,6 @@ int main(int argc, char **argv) {
     }
 
     if (init_hostname() != 0) {
-        fprintf(stderr, "%s\n", strerror(errno));
         boot_notify(-1, "Get hostname failed: %s", strerror(errno));
         exit(1);
     }
@@ -758,7 +937,6 @@ int main(int argc, char **argv) {
 
     if (moni(global_conf.moni_dir) != 0) {
         FATAL_LOG("filmond exit abnormally");
-        fprintf(stderr, "filmond exit abnormally\n");
     }
 
 

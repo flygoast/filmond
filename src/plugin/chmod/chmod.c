@@ -11,38 +11,53 @@
 
 
 static char     *moni_dir;
-static mode_t    origin_mode;
-static mode_t    target_mode;
+static mode_t    file_origin_mode;
+static mode_t    file_target_mode;
+static mode_t    dir_origin_mode;
+static mode_t    dir_target_mode;
 
 
-static int chmod_file(char *filepath, const struct stat *st) {
-    char    fullpath[PATH_MAX];
-    int     ret;
-
-    ret = snprintf(fullpath, PATH_MAX, "%s/%s", moni_dir, filepath);
-
-    if (ret >= PATH_MAX) {
-        ERROR_LOG("file path is too long: %s", filepath);
-        return FILMOND_DECLINED;
-    }
-
-    if (origin_mode == 0) {
-        /*
-         * just care for 'rwx' permissions
-         */
-        if ((st->st_mode & 0777) != target_mode) {
-            if (chmod(fullpath, target_mode) != 0) {
-                ERROR_LOG("chmod(\"%s\", %d) failed: %s", filepath, target_mode,
-                    strerror(errno));
-                return FILMOND_DECLINED;
+static int chmod_path(const char *path, const struct stat *st) {
+    if (S_ISDIR(st->st_mode)) {
+        if (dir_origin_mode == 0) {
+            /*
+             * just care for 'rwx' permissions
+             */
+            if ((st->st_mode & 0777) != dir_target_mode) {
+                if (chmod(path, dir_target_mode) != 0) {
+                    ERROR_LOG("chmod(\"%s\", %d) failed: %s", path, 
+                        dir_target_mode, strerror(errno));
+                    return FILMOND_DECLINED;
+                }
+            }
+        } else {
+            if ((st->st_mode & 0777) == dir_origin_mode) {
+                if (chmod(path, dir_target_mode) != 0) {
+                    ERROR_LOG("chmod(\"%s\", %d) failed: %s", path, 
+                        dir_target_mode, strerror(errno));
+                    return FILMOND_DECLINED;
+                }
             }
         }
     } else {
-        if ((st->st_mode & 0777) == origin_mode) {
-            if (chmod(fullpath, target_mode) != 0) {
-                ERROR_LOG("chmod(\"%s\", %d) failed: %s", filepath, target_mode,
-                    strerror(errno));
-                return FILMOND_DECLINED;
+        if (file_origin_mode == 0) {
+            /*
+             * just care for 'rwx' permissions
+             */
+            if ((st->st_mode & 0777) != file_target_mode) {
+                if (chmod(path, file_target_mode) != 0) {
+                    ERROR_LOG("chmod(\"%s\", %d) failed: %s", path, 
+                        file_target_mode, strerror(errno));
+                    return FILMOND_DECLINED;
+                }
+            }
+        } else {
+            if ((st->st_mode & 0777) == file_origin_mode) {
+                if (chmod(path, file_target_mode) != 0) {
+                    ERROR_LOG("chmod(\"%s\", %d) failed: %s", path, 
+                        file_target_mode, strerror(errno));
+                    return FILMOND_DECLINED;
+                }
             }
         }
     }
@@ -51,25 +66,76 @@ static int chmod_file(char *filepath, const struct stat *st) {
 }
 
 
-int plugin_file_ftw(char *filepath, const struct stat *st) {
-    return chmod_file(filepath, st);
-}
+int plugin_file_ftw(const char *filepath, const struct stat *st) {
+    char fullpath[PATH_MAX];
+    int  ret;
 
-
-int plugin_file_event(int action, char *filepath, const struct stat *st) {
-    if (action == ACTION_DEL) {
+    ret = snprintf(fullpath, PATH_MAX, "%s/%s", moni_dir, filepath);
+    if (ret >= PATH_MAX) {
+        ERROR_LOG("file path is too long: %s", filepath);
         return FILMOND_DECLINED;
     }
 
-    return chmod_file(filepath, st);
+    return chmod_path(fullpath, st);
+}
+
+
+int plugin_file_event(int action, char *filepath, char *moved_from) {
+    struct stat     st;
+
+    switch (action) {
+    case ACTION_FILE_MODIFY:
+    case ACTION_FILE_ATTRIB:
+        if (stat(filepath, &st) < 0) {
+            ERROR_LOG("stat %s failed:%s", filepath, strerror(errno));
+            return FILMOND_DECLINED;
+        }
+
+        return chmod_path(filepath, &st);
+    }
+
+    return FILMOND_DECLINED;
+}
+
+
+int plugin_dir_ftw(const char *dirpath, const struct stat *st) {
+    char fullpath[PATH_MAX];
+    int  ret;
+
+    ret = snprintf(fullpath, PATH_MAX, "%s/%s", moni_dir, dirpath);
+    if (ret >= PATH_MAX) {
+        ERROR_LOG("file path is too long: %s", dirpath);
+        return FILMOND_DECLINED;
+    }
+
+    return chmod_path(dirpath, st);
+}
+
+
+int plugin_dir_event(int action, char *dirpath, char *moved_from) {
+    struct stat     st;
+
+    switch (action) {
+    case ACTION_DIR_ATTRIB:
+    case ACTION_DIR_MODIFY:
+        if (stat(dirpath, &st) < 0) {
+            ERROR_LOG("stat %s failed:%s", dirpath, strerror(errno));
+            return FILMOND_DECLINED;
+        }
+        return chmod_path(dirpath, &st);
+    }
+
+    return FILMOND_DECLINED;
 }
 
 
 int plugin_init(conf_t *conf) {
     moni_dir = conf_get_str_value(conf, "moni_dir", 
         "/usr/local/apache2/htdocs");
-    origin_mode = conf_get_int_value(conf, "origin_mode", 0);
-    target_mode = conf_get_int_value(conf, "target_mode", 0644);
+    file_origin_mode = conf_get_int_value(conf, "file_origin_mode", 0);
+    file_target_mode = conf_get_int_value(conf, "file_target_mode", 0644);
+    dir_origin_mode = conf_get_int_value(conf, "dir_origin_mode", 0);
+    dir_target_mode = conf_get_int_value(conf, "dir_target_mode", 0755);
 
     return FILMOND_DECLINED;
 }

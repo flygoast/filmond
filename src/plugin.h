@@ -11,13 +11,22 @@
 __BEGIN_DECLS
 
 
-#define FILMOND_DECLINED    0
-#define FILMOND_DONE        -1
-#define FILMOND_ERROR       -2
+#define FILMOND_DECLINED        0
+#define FILMOND_DONE            -1
+#define FILMOND_ERROR           -2
 
 
-#define ACTION_ADD_OR_MOD   'a'
-#define ACTION_DEL          'd'
+#define ACTION_FILE_CREATE      0
+#define ACTION_FILE_DELETE      1
+#define ACTION_FILE_ATTRIB      2
+#define ACTION_FILE_MODIFY      3
+#define ACTION_FILE_MOVE        4
+
+#define ACTION_DIR_CREATE       5
+#define ACTION_DIR_DELETE       6
+#define ACTION_DIR_ATTRIB       7
+#define ACTION_DIR_MODIFY       8
+#define ACTION_DIR_MOVE         9
 
 
 extern __attribute__((weak)) char *g_hostname; /* defined in filmond.c */
@@ -32,10 +41,12 @@ extern __attribute__((weak)) char *g_hostname; /* defined in filmond.c */
  * 
  */
 int plugin_init(conf_t *conf);
-int plugin_file_ftw(char *filepath, const struct stat *st);
-int plugin_file_event(int action, char *filepath, const struct stat *st);
-int plugin_deinit(conf_t *conf);
+int plugin_dir_ftw(const char *dirpath, const struct stat *st);
+int plugin_file_ftw(const char *filepath, const struct stat *st);
 int plugin_ftw_post();
+int plugin_file_event(int action, char *fullpath, char *moved_from);
+int plugin_dir_event(int action, char *fullpath, char *moved_from);
+int plugin_deinit(conf_t *conf);
 
 
 /* Add interp section just for geek.
