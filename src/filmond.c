@@ -708,7 +708,7 @@ int main(int argc, char **argv) {
             "log_multi", LOG_MULTI_NO);
 
         if (load_plugins(&g_conf) < 0) {
-            boot_notify(-1, "NO config file specified");
+            boot_notify(-1, "Load filmond plugins");
             exit(1);
         }
 
