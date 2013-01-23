@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS  = -fPIC -Wall -pipe -DDEBUG -g -D_GNU_SOURCE -D_REENTRANT
 LDFLAGS = -Wl,-e,__chmod_plugin_main
-LIB 	= -L ../../lib -ldl -lrt -rdynamic -ljson -lcurl -lcrypto -lssl
+LIB 	= -ldl -lrt -rdynamic
 INC     = -I ../../
 OO	= chmod.o
 TARGETS = chmod.so
