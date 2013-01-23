@@ -1,0 +1,39 @@
+moni_dir        /home/flygoast/
+exclude         /home/flygoast/demo/dummy
+valid_exten     apk 7z gz tgz bz2 zip rar exe cab msi dat ini txt html sisx sis ipa gzip z uiz c
+
+#=====================================
+# plugin directory
+#=====================================
+so_dir          .
+plugin_so       submit.so
+#plugin_so       chmod.so
+
+#===================================
+# chmod plugin configs
+#===================================
+# chmod mode 0700
+dir_origin_mode      448
+# chmod mode 0755
+dir_target_mode      493
+# chmod mode 0600
+file_origin_mode     384
+# chmod mode 0644
+file_target_mode     420
+
+#====================================
+# submit plugin configs
+#====================================
+submit_addr     http://127.0.0.1/submit
+submit_host     www.flygoast.net
+thread_stack    1048576
+
+#===============================
+# log file configs
+#===============================
+log_dir         /home/flygoast/
+log_name        filmond.log
+log_level       4
+log_size        30000000
+log_num         2
+log_multi       no
