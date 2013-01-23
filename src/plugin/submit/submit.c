@@ -32,7 +32,8 @@ typedef struct task_item_s {
 } task_item_t;
 
 
-static void add_fileinfo_json(char *filepath, const struct stat *st) {
+static void add_fileinfo_json(json_object *obj, char *filepath, 
+        const struct stat *st) {
     char             buf[BUF_SIZE] = {};
     char            *buf_big = NULL;
     int              filepath_len;
@@ -54,7 +55,7 @@ static void add_fileinfo_json(char *filepath, const struct stat *st) {
     }
 
     if (st == NULL) { /* for DELETE event */
-        json_object_object_add(files_json, key, json_object_new_object());
+        json_object_object_add(obj, key, json_object_new_object());
         return;
     }
 
@@ -92,7 +93,7 @@ static void add_fileinfo_json(char *filepath, const struct stat *st) {
     json_object_object_add(fileinfo_json, "owner",
         json_object_new_string(pw.pw_name));
 
-    json_object_object_add(files_json, key, fileinfo_json);
+    json_object_object_add(obj, key, fileinfo_json);
 
     DEBUG_LOG("File: %s, MD5: %s, SIZE: %lu", filepath, key, st->st_size);
 
@@ -235,7 +236,7 @@ int plugin_file_ftw(char *filepath, const struct stat *st) {
         files_json = json_object_new_object();
     }
 
-    add_fileinfo_json(filepath, st);
+    add_fileinfo_json(files_json, filepath, st);
 
     if (++count >= 30) {
         submit_file(ACTION_ADD_OR_MOD, files_json);
@@ -249,20 +250,17 @@ int plugin_file_ftw(char *filepath, const struct stat *st) {
 
 
 int plugin_file_event(int action, char *filepath, const struct stat *st) {
-    assert(files_json == NULL);
-
-    files_json = json_object_new_object();
+    json_object *files_obj = json_object_new_object();
 
     if (action == ACTION_DEL) {
-        add_fileinfo_json(filepath, NULL);
-        submit_file(ACTION_DEL, files_json);
+        add_fileinfo_json(files_obj, filepath, NULL);
+        submit_file(ACTION_DEL, files_obj);
     } else if (action == ACTION_ADD_OR_MOD) {
-        add_fileinfo_json(filepath, st);
-        submit_file(ACTION_ADD_OR_MOD, files_json);
+        add_fileinfo_json(files_obj, filepath, st);
+        submit_file(ACTION_ADD_OR_MOD, files_obj);
     }
 
-    json_object_put(files_json);
-    files_json = NULL;
+    json_object_put(files_obj);
 
     return FILMOND_DECLINED;
 }
