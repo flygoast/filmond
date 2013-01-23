@@ -185,13 +185,13 @@ void log_close() {
 }
 
 void log_write(int level, const char *fmt, ...) {
-    struct  tm tm;
-    int     pos;
-    int     end;
-    int     status;
-    va_list ap;
-    time_t now;
-    int     index;
+    struct tm   tm;
+    int         pos;
+    int         end;
+    int         status;
+    va_list     ap;
+    time_t      now;
+    int         index;
 
     if (level > log_level) {
         return;
@@ -210,6 +210,9 @@ void log_write(int level, const char *fmt, ...) {
 
     now = time(NULL);
     localtime_r(&now, &tm);
+    /*
+     * we assume the string length would not beyond the buffer boundary
+     */
     pos = sprintf(log_buffer, 
         "[%04d/%02d/%02d-%02d:%02d:%02d][%05d][%s]", 
         tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, 
@@ -224,6 +227,7 @@ void log_write(int level, const char *fmt, ...) {
         log_buffer[end + pos] = '\n';
     } else {
         log_buffer[LOG_BUFFER_SIZE - 2] = '\n';
+        end = LOG_BUFFER_SIZE - pos - 1;
     }
 
     index = log_multi ? level : 0;
