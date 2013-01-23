@@ -18,13 +18,9 @@ according to your need. Please refer the plugin directory.
 Plugins
 -------
 
-* submit
+* **submit**: By HTTP, submit file information to remote server.
 
-By HTTP, submit file information to remote server.
-
-* chmod 
-
-Process invalid file permisssion.
+* **chmod**: Process invalid file permisssion.
 
 
 Requirements
