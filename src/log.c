@@ -214,7 +214,7 @@ void log_write(int level, const char *fmt, ...) {
      * we assume the string length would not beyond the buffer boundary
      */
     pos = sprintf(log_buffer, 
-        "[%04d/%02d/%02d-%02d:%02d:%02d][%05d][%s]", 
+        "[%04d/%02d/%02d-%02d:%02d:%02d][%06d][%s]", 
         tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, 
         tm.tm_hour, tm.tm_min, tm.tm_sec, getpid(), 
         log_level_text[level]);
