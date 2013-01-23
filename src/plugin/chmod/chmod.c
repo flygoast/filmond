@@ -11,6 +11,7 @@
 
 
 static char     *moni_dir;
+static mode_t    origin_mode;
 static mode_t    target_mode;
 
 
@@ -25,11 +26,24 @@ static int chmod_file(char *filepath, const struct stat *st) {
         return FILMOND_DECLINED;
     }
 
-    if (st->st_mode != target_mode) {
-        if (chmod(fullpath, target_mode) != 0) {
-            ERROR_LOG("chmod(\"%s\", %d) failed: %s", filepath, target_mode,
-                strerror(errno));
-            return FILMOND_DECLINED;
+    if (origin_mode == 0) {
+        /*
+         * just care for 'rwx' permissions
+         */
+        if ((st->st_mode & 0777) != target_mode) {
+            if (chmod(fullpath, target_mode) != 0) {
+                ERROR_LOG("chmod(\"%s\", %d) failed: %s", filepath, target_mode,
+                    strerror(errno));
+                return FILMOND_DECLINED;
+            }
+        }
+    } else {
+        if ((st->st_mode & 0777) == origin_mode) {
+            if (chmod(fullpath, target_mode) != 0) {
+                ERROR_LOG("chmod(\"%s\", %d) failed: %s", filepath, target_mode,
+                    strerror(errno));
+                return FILMOND_DECLINED;
+            }
         }
     }
 
@@ -54,7 +68,8 @@ int plugin_file_event(int action, char *filepath, const struct stat *st) {
 int plugin_init(conf_t *conf) {
     moni_dir = conf_get_str_value(conf, "moni_dir", 
         "/usr/local/apache2/htdocs");
-    target_mode = conf_get_int_value(conf, "chmod_mode", 0600);
+    origin_mode = conf_get_int_value(conf, "origin_mode", 0);
+    target_mode = conf_get_int_value(conf, "target_mode", 0644);
 
     return FILMOND_DECLINED;
 }

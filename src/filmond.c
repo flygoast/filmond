@@ -138,6 +138,11 @@ static int init_plugins(conf_t *conf) {
     for (i = plugin_vec.count - 1; i >= 0; --i) {
 
         plugin = vector_get_at(&plugin_vec, i);
+
+        if (plugin->func.plugin_init == NULL) {
+            continue;
+        }
+
         ret = plugin->func.plugin_init(conf);
 
         if (ret == FILMOND_DECLINED) {
@@ -161,6 +166,11 @@ static int deinit_plugins(conf_t *conf) {
     for (i = plugin_vec.count - 1; i >= 0; --i) {
 
         plugin = vector_get_at(&plugin_vec, i);
+
+        if (plugin->func.plugin_deinit == NULL) {
+            continue;
+        }
+
         ret = plugin->func.plugin_deinit(conf);
 
         if (ret == FILMOND_DECLINED) {
@@ -184,6 +194,11 @@ static int file_ftw_plugins(char *filepath, const struct stat *st) {
     for (i = plugin_vec.count - 1; i >= 0; --i) {
 
         plugin = vector_get_at(&plugin_vec, i);
+
+        if (plugin->func.plugin_file_ftw == NULL) {
+            continue;
+        }
+
         ret = plugin->func.plugin_file_ftw(filepath, st);
 
         if (ret == FILMOND_DECLINED) {
@@ -208,6 +223,11 @@ static int file_event_plugins(int action, char *filepath,
     for (i = plugin_vec.count - 1; i >= 0; --i) {
 
         plugin = vector_get_at(&plugin_vec, i);
+
+        if (plugin->func.plugin_file_event == NULL) {
+            continue;
+        }
+
         ret = plugin->func.plugin_file_event(action, filepath, st);
 
         if (ret == FILMOND_DECLINED) {
@@ -231,6 +251,11 @@ static int ftw_post_plugins() {
     for (i = plugin_vec.count - 1; i >= 0; --i) {
 
         plugin = vector_get_at(&plugin_vec, i);
+
+        if (plugin->func.plugin_ftw_post == NULL) {
+            continue;
+        }
+
         ret = plugin->func.plugin_ftw_post();
 
         if (ret == FILMOND_DECLINED) {
