@@ -20,7 +20,7 @@ Plugins
 
 * **submit**: By HTTP, submit file information to remote server.
 
-* **chmod**: Process invalid file permisssion.
+* **chmod**: Process invalid file and directory permisssion.
 
 
 Requirements
