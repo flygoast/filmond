@@ -40,8 +40,17 @@ extern __attribute__((weak)) char *g_hostname; /* defined in filmond.c */
  *  FILMOND_ERROR:      directly return, stop processing following plugin.
  * 
  */
+
 int plugin_init(conf_t *conf);
+/*
+ * 'dirpath' is passed the value of parameter 'moni_dir' in conf file concated
+ * with path of child directory.
+ */
 int plugin_dir_ftw(const char *dirpath, const struct stat *st);
+/*
+ * 'filepath' is the pathname of the entry relative to 'dirpath' passed in
+ * plugin_dir_ftw. You can also refer nftw(3).
+ */
 int plugin_file_ftw(const char *filepath, const struct stat *st);
 int plugin_ftw_post();
 int plugin_file_event(int action, char *fullpath, char *moved_from);

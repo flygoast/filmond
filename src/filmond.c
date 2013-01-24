@@ -635,7 +635,6 @@ static int moni(char *monidir) {
         }
 
         if (event->mask & IN_IGNORED) {
-            ERROR_LOG("inotify ignored:%s", strerror(inotifytools_error()));
             continue;
         }
 

@@ -127,7 +127,6 @@ static void submit_file_info(void *arg) {
 
     curl = curl_easy_init();
     if (!curl) {
-        fprintf(stderr, "curl_easy_init failed\n");
         ERROR_LOG("curl_easy_init failed");
         goto end;
     }
@@ -152,22 +151,17 @@ static void submit_file_info(void *arg) {
 
     res = curl_easy_perform(curl);
     if (res != 0) {
-        fprintf(stderr, "curl_easy_perform failed:%s\n", 
-                curl_easy_strerror(res));
         ERROR_LOG("curl_easy_perform failed:%s", curl_easy_strerror(res));
         goto release;
     }
 
     res = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &rc);
     if (res != 0) {
-        fprintf(stderr, "curl_easy_getinfo failed:%s\n", 
-                curl_easy_strerror(res));
         ERROR_LOG("curl_easy_getinfo failed:%s", curl_easy_strerror(res));
         goto release;
     }
 
     if (rc != 200) {
-        fprintf(stderr, "submit failed: HTTP CODE: %ld\n", rc);
         ERROR_LOG("submit failed: HTTP CODE: %ld", rc);
         goto release;
     }
@@ -176,19 +170,15 @@ static void submit_file_info(void *arg) {
 
     obj = json_tokener_parse(response);
     if (is_error(obj) || json_object_get_type(obj) != json_type_object) {
-        printf("submit failed");
         ERROR_LOG("Invalid json string: %s", response);
     } else {
         struct json_object *j = json_object_object_get(obj, "error");
         if (json_object_get_type(j) != json_type_string) {
-            printf("submit failed");
             ERROR_LOG("Invalid json string: %s", response);
         } else {
             if (strcmp("no error", json_object_get_string(j))) {
-                printf("submit failed");
                 ERROR_LOG("Invalid json string: %s", response);
             } else {
-                printf("submit success\n");
                 DEBUG_LOG("submit success");
             }
         }
@@ -212,7 +202,6 @@ static void submit_file(char action, json_object *obj) {
     /* The allocated memory freed in submit_file_info(). */
     item = (task_item_t *)malloc(sizeof(*item));
     if (!item) {
-        fprintf(stderr, "Out of memory\n");
         ERROR_LOG("Out of memory");
         return;
     }
@@ -222,13 +211,11 @@ static void submit_file(char action, json_object *obj) {
 
     if (!item->post) {
         free(item);
-        fprintf(stderr, "Out of memory\n");
         ERROR_LOG("Out of memory");
         return;
     }
 
     if (threadpool_add_task(g_pool, submit_file_info, item, 0) != 0) {
-        fprintf(stderr, "Add task to threadpool failed: %s\n", item->post);
         ERROR_LOG("Add task to threadpool failed: %s", item->post);
         free(item->post);
         free(item);

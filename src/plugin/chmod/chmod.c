@@ -29,6 +29,9 @@ static int chmod_path(const char *path, const struct stat *st) {
                         dir_target_mode, strerror(errno));
                     return FILMOND_DECLINED;
                 }
+
+                DEBUG_LOG("chmod dir \"%s\" from 0%o to 0%o)", path,
+                          st->st_mode & 0777, dir_target_mode);
             }
         } else {
             if ((st->st_mode & 0777) == dir_origin_mode) {
@@ -37,6 +40,9 @@ static int chmod_path(const char *path, const struct stat *st) {
                         dir_target_mode, strerror(errno));
                     return FILMOND_DECLINED;
                 }
+
+                DEBUG_LOG("chmod dir \"%s\" from 0%o to 0%o)", path,
+                          dir_origin_mode, dir_target_mode);
             }
         }
     } else {
@@ -50,6 +56,9 @@ static int chmod_path(const char *path, const struct stat *st) {
                         file_target_mode, strerror(errno));
                     return FILMOND_DECLINED;
                 }
+
+                DEBUG_LOG("chmod file \"%s\" from 0%o to 0%o)", path,
+                          st->st_mode & 0777, file_target_mode);
             }
         } else {
             if ((st->st_mode & 0777) == file_origin_mode) {
@@ -58,6 +67,9 @@ static int chmod_path(const char *path, const struct stat *st) {
                         file_target_mode, strerror(errno));
                     return FILMOND_DECLINED;
                 }
+
+                DEBUG_LOG("chmod file \"%s\" from 0%o to 0%o)", path,
+                          file_origin_mode, file_target_mode);
             }
         }
     }
