@@ -22,6 +22,8 @@ Plugins
 
 * **chmod**: Process invalid file and directory permisssion.
 
+* **demo**: A demo as tutorial for filmond plugin development.
+
 
 Requirements
 ------------
