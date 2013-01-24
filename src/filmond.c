@@ -344,7 +344,6 @@ static void start_ftw() {
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
     assert(pthread_create(&tid, &attr, filmond_ftw, NULL) == 0);
-
     pthread_attr_destroy(&attr);
 }
 

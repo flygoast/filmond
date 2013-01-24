@@ -25,7 +25,7 @@ static char               *submit_addr;
 static char               *submit_host;
 static char               *moni_dir;
 static threadpool_t       *g_pool;
-static int                 count;
+static int                 g_count;
 static char                add_uri[URI_LIMIT];
 static char                delete_uri[URI_LIMIT];
 static int                 thread_stack;
@@ -173,16 +173,19 @@ static void submit_file_info(void *arg) {
         ERROR_LOG("Invalid json string: %s", response);
     } else {
         struct json_object *j = json_object_object_get(obj, "error");
-        if (json_object_get_type(j) != json_type_string) {
+        if (!j) {
             ERROR_LOG("Invalid json string: %s", response);
         } else {
-            if (strcmp("no error", json_object_get_string(j))) {
+            if (json_object_get_type(j) != json_type_string) {
                 ERROR_LOG("Invalid json string: %s", response);
             } else {
-                DEBUG_LOG("submit success");
+                if (strcmp("no error", json_object_get_string(j))) {
+                    ERROR_LOG("Invalid json string: %s", response);
+                } else {
+                    DEBUG_LOG("submit success");
+                }
             }
         }
-        json_object_put(j);
     }
 
     json_object_put(obj);
@@ -230,11 +233,11 @@ int plugin_file_ftw(const char *filepath, const struct stat *st) {
 
     add_fileinfo_json(files_json, (char *)filepath, st);
 
-    if (++count >= 30) {
+    if (++g_count >= 30) {
         submit_file(ACTION_ADD_OR_MOD, files_json);
         json_object_put(files_json);
         files_json = NULL;
-        count = 0;
+        g_count = 0;
     }
 
     return FILMOND_DECLINED;
@@ -349,11 +352,11 @@ int plugin_deinit(conf_t *conf) {
 }
 
 int plugin_ftw_post() {
-    if (count > 0) {
+    if (g_count > 0) {
         submit_file(ACTION_ADD_OR_MOD, files_json);
         json_object_put(files_json);
         files_json = NULL;
-        count = 0;
+        g_count = 0;
     }
 
     return FILMOND_DECLINED;
