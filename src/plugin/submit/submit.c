@@ -299,6 +299,7 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
             ++path;
         }
 
+        files_obj = json_object_new_object();
         add_fileinfo_json(files_obj, path, NULL);
         submit_file(ACTION_DEL, files_obj);
         json_object_put(files_obj);
