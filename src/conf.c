@@ -324,7 +324,7 @@ static int conf_parse(conf_t *conf, char *resolved_path,
         FILE *fp, int block) {
     int n;
     int ret = 0;
-    char buf[MAX_LINE];
+    char buf[MAX_LINE] = {};
     unsigned char *field[2];
     conf_value_t *cv;
     char *var = NULL;
@@ -344,6 +344,10 @@ static int conf_parse(conf_t *conf, char *resolved_path,
  
     while (fgets(buf, MAX_LINE, fp)) {
         n = strlen(buf);
+        if (n == 0) {
+            continue;
+        }
+
         if (buf[n - 1] == '\n') {
             buf[n - 1] = '\0';
         }

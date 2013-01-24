@@ -105,6 +105,8 @@ static int load_filmond_plugin(void *key, void *value, void *userptr) {
     snprintf(fullpath, PATH_MAX - 1, "%s/%s", global_conf.plugin_dir,
              (char *)value);
 
+    plugin.so_name = strdup((char *)value);
+
     if (load_so(&plugin.handle, syms, fullpath) < 0) {
         return -1;
     }
@@ -136,7 +138,10 @@ static void unload_plugins() {
     for (i = 0; i < plugin_vec.count; ++i) {
         plugin = vector_get_at(&plugin_vec, i);
         unload_so(&plugin->handle);
+        free(plugin->so_name);
     }
+
+    vector_destroy(&plugin_vec);
 }
 
 
@@ -677,6 +682,10 @@ static int ftw_cb(const char *fpath, const struct stat *st,
     char                *filepath;
     char                *extension = NULL;
 
+    if (stop) {
+        return FTW_STOP;
+    }
+
     if (tflag == FTW_D) {
         for (i = 0; exclude[i]; ++i) {
             if (!strcmp(exclude[i], fpath)) {
@@ -791,7 +800,14 @@ static void rlimit_reset() {
 
 
 static void sig_handler(int signo) {
-    DEBUG_LOG("Receive signo:%d", signo);
+    DEBUG_LOG("Receive signo:%d, get ready to exit", signo);
+
+    if (stop == 1) {
+        /*
+         * exit rudely
+         */
+        _exit(1);
+    }
 
     stop = 1;
 }
