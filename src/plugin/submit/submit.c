@@ -19,13 +19,20 @@
 #define ACTION_ADD_OR_MOD   'a'
 #define ACTION_DEL          'd'
 
+
+typedef struct thread_ctx_s {
+    json_object           *files_json;
+    threadpool_t          *pool;
+    int                    count;
+} thread_ctx_t;
+
+
 static struct curl_slist  *list;
-static json_object        *files_json;
 static char               *submit_addr;
 static char               *submit_host;
 static char               *moni_dir;
-static threadpool_t       *g_pool;
-static int                 g_count;
+static thread_ctx_t       *thread_ctxs;
+static int                 thread_num;
 static char                add_uri[URI_LIMIT];
 static char                delete_uri[URI_LIMIT];
 static int                 thread_stack;
@@ -35,6 +42,18 @@ typedef struct task_item_s {
     int             action;
     char           *post;
 } task_item_t;
+
+
+static int get_pool_id(const char *filepath) {
+    unsigned int h = 5381;
+    const char *ptr = filepath;
+
+    while (*ptr != '\0') {
+        h = (h + (h << 5)) + (*ptr++);
+    }
+
+    return h % thread_num;
+}
 
 
 static void add_fileinfo_json(json_object *obj, char *filepath, 
@@ -142,8 +161,6 @@ static void submit_file_info(void *arg) {
         assert(0);
     }
 
-    DEBUG_LOG("POST: %s", item->post);
-
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, item->post);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
@@ -199,7 +216,7 @@ end:
 }
 
 
-static void submit_file(char action, json_object *obj) {
+static void submit_file(char action, json_object *obj, int pool_id) {
     task_item_t     *item;
 
     /* The allocated memory freed in submit_file_info(). */
@@ -218,7 +235,8 @@ static void submit_file(char action, json_object *obj) {
         return;
     }
 
-    if (threadpool_add_task(g_pool, submit_file_info, item, 0) != 0) {
+    if (threadpool_add_task(thread_ctxs[pool_id].pool, 
+                            submit_file_info, item, 0) != 0) {
         ERROR_LOG("Add task to threadpool failed: %s", item->post);
         free(item->post);
         free(item);
@@ -227,17 +245,20 @@ static void submit_file(char action, json_object *obj) {
 
 
 int plugin_file_ftw(const char *filepath, const struct stat *st) {
-    if (files_json == NULL) {
-        files_json = json_object_new_object();
+    int pool_id = get_pool_id(filepath);
+
+    if (thread_ctxs[pool_id].files_json == NULL) {
+        thread_ctxs[pool_id].files_json = json_object_new_object();
     }
 
-    add_fileinfo_json(files_json, (char *)filepath, st);
+    add_fileinfo_json(thread_ctxs[pool_id].files_json, (char *)filepath, st);
 
-    if (++g_count >= 30) {
-        submit_file(ACTION_ADD_OR_MOD, files_json);
-        json_object_put(files_json);
-        files_json = NULL;
-        g_count = 0;
+    if (++thread_ctxs[pool_id].count >= 30) {
+        submit_file(ACTION_ADD_OR_MOD, thread_ctxs[pool_id].files_json,
+                    pool_id);
+        json_object_put(thread_ctxs[pool_id].files_json);
+        thread_ctxs[pool_id].files_json = NULL;
+        thread_ctxs[pool_id].count = 0;
     }
 
     return FILMOND_DECLINED;
@@ -251,7 +272,9 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
     struct stat      st;
     json_object     *files_obj;
     char            *path;
+    int              pool_id;
     
+
     switch (action) {
     case ACTION_FILE_ATTRIB:
     case ACTION_FILE_MODIFY:
@@ -260,6 +283,8 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
             ++path;
         }
 
+        pool_id = get_pool_id(path);
+
         if (stat(filepath, &st) < 0) {
             ERROR_LOG("stat %s failed:%s", filepath, strerror(errno));
             return FILMOND_DECLINED;
@@ -267,7 +292,7 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
 
         files_obj = json_object_new_object();
         add_fileinfo_json(files_obj, path, &st);
-        submit_file(ACTION_ADD_OR_MOD, files_obj);
+        submit_file(ACTION_ADD_OR_MOD, files_obj, pool_id);
         json_object_put(files_obj);
         break;
 
@@ -277,9 +302,11 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
             ++path;
         }
 
+        pool_id = get_pool_id(path);
+
         files_obj = json_object_new_object();
         add_fileinfo_json(files_obj, path, NULL);
-        submit_file(ACTION_DEL, files_obj);
+        submit_file(ACTION_DEL, files_obj, pool_id);
         json_object_put(files_obj);
         break;
 
@@ -289,9 +316,11 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
             ++path;
         }
 
+        pool_id = get_pool_id(path);
+
         files_obj = json_object_new_object();
         add_fileinfo_json(files_obj, path, NULL);
-        submit_file(ACTION_DEL, files_obj);
+        submit_file(ACTION_DEL, files_obj, pool_id);
         json_object_put(files_obj);
         break;
     }
@@ -301,13 +330,15 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
 
 
 int plugin_init(conf_t *conf) {
-    char header_buf[128];
+    int   i;
+    char  header_buf[128];
 
     moni_dir = conf_get_str_value(conf, "moni_dir",
         "/usr/local/apache2/htdocs");
     submit_addr = conf_get_str_value(conf, "submit_addr", NULL);
     submit_host = conf_get_str_value(conf, "submit_host", NULL);
     thread_stack = conf_get_int_value(conf, "thread_stack", 1048576);
+    thread_num = conf_get_int_value(conf, "thread_num", 10);
 
     if (!submit_addr) {
         boot_notify(-1, "No submit address");
@@ -319,16 +350,29 @@ int plugin_init(conf_t *conf) {
         return FILMOND_ERROR;
     }
 
+    /*
+     * set by calloc():
+     *
+     *      thread_ctxs[i].json_files = NULL;
+     *      thread_ctxs[i].count = 0;
+     *
+     */
+    thread_ctxs = (thread_ctx_t *)calloc(sizeof(thread_ctx_t), thread_num);
+    if (thread_ctxs == NULL) {
+        boot_notify(-1, "Out of memory");
+        return FILMOND_ERROR;
+    }
+
     snprintf(add_uri, URI_LIMIT, "%s?host=%s&action=add", submit_addr, 
         g_hostname);
 
     snprintf(delete_uri, URI_LIMIT, "%s?host=%s&action=delete", submit_addr,
         g_hostname);
 
-    /*
-     * To promise FIFO of submitting, I just create one thread in the pool.
-     */ 
-    assert((g_pool = threadpool_create(1, 1, thread_stack)));
+    for (i = 0; i < thread_num; ++i) {
+        thread_ctxs[i].pool = threadpool_create(1, 1, thread_stack);
+        assert(thread_ctxs[i].pool);
+    }
 
     if (submit_host) {
         snprintf(header_buf, 128, "Host: %s", submit_host);
@@ -342,21 +386,31 @@ int plugin_init(conf_t *conf) {
 
 
 int plugin_deinit(conf_t *conf) {
+    int  i;
+
     curl_slist_free_all(list);
 
     curl_global_cleanup();
 
-    threadpool_destroy(g_pool, 1, 10);
+    for (i = 0; i < thread_num; ++i) {
+        threadpool_destroy(thread_ctxs[i].pool, 1, 10);
+    }
+
+    free(thread_ctxs);
 
     return FILMOND_DECLINED;
 }
 
 int plugin_ftw_post() {
-    if (g_count > 0) {
-        submit_file(ACTION_ADD_OR_MOD, files_json);
-        json_object_put(files_json);
-        files_json = NULL;
-        g_count = 0;
+    int  i;
+
+    for (i = 0; i < thread_num; ++i) {
+        if (thread_ctxs[i].count > 0) {
+            submit_file(ACTION_ADD_OR_MOD, thread_ctxs[i].files_json, i);
+            json_object_put(thread_ctxs[i].files_json);
+            thread_ctxs[i].files_json = NULL;
+            thread_ctxs[i].count = 0;
+        }
     }
 
     return FILMOND_DECLINED;
