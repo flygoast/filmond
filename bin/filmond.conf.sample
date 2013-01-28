@@ -1,6 +1,11 @@
 moni_dir        /home/flygoast/
 exclude         /home/flygoast/demo/dummy
-valid_exten     apk 7z gz tgz bz2 zip rar exe cab msi dat ini txt html sisx sis ipa gzip z uiz c
+filter_mode     deny 
+path_filter     "\.apk$"
+path_filter     "\.7z$"
+path_filter     "\.gz$"
+path_filter     ".*.*$"
+
 
 #=====================================
 # plugin directory

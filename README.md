@@ -28,13 +28,15 @@ Plugins
 Requirements
 ------------
 
-* inotifytool(https://github.com/rvoicilas/inotify-tools)
+* **inotifytool**(https://github.com/rvoicilas/inotify-tools)
 
-* libcurl(https://github.com/bagder/curl)
+* **libcurl**(https://github.com/bagder/curl)
 
-* json-c(https://github.com/json-c/json-c)
+* **json-c**(https://github.com/json-c/json-c)
 
-* tokyocabinet(http://fallabs.com/tokyocabinet)
+* **tokyocabinet**(http://fallabs.com/tokyocabinet)
+
+* **pcre**(http://www.pcre.org/)
 
 
 Build
