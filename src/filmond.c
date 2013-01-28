@@ -22,6 +22,7 @@
 #include "vector.h"
 #include "plugin.h"
 #include "version.h"
+#include "pcre.h"
 #include "inotifytools/inotify.h"
 #include "inotifytools/inotifytools.h"
 
@@ -41,22 +42,26 @@
 #define EVENT_DIR           0
 #define EVENT_FILE          1 
 
+#define FILTER_ALLOW        0
+#define FILTER_DENY         1
+
 
 char                   *g_hostname;
-static char            *exten[30];
 static char            *exclude[30];
 static int              g_hostname_size;
 static vector_t         plugin_vec;
+static vector_t         filter_vec;              
+static int              filter_mode;
 static volatile int     stop;
 static char             moved_from[MAX_PATH_LEN];
 static int              event_type;
 static int              timeout;
 
+
 struct global_conf_st {
     char    *plugin_dir;
     char    *moni_dir;
     char    *exclude;
-    char    *valid_exten;
     char    *log_dir;
     char    *log_name;
     int      log_level;
@@ -84,7 +89,104 @@ typedef struct filmond_plugin_s {
 } filmond_plugin_t;
 
 
+typedef struct filter_s {
+    pcre        *re;
+} filter_t;
+
+
 static void *filmond_ftw(void *arg);
+
+
+static int filter_skip(const char *path) {
+    filter_t        *f;
+    int              i;
+    int              rc;
+    
+    if (filter_mode == FILTER_ALLOW) {
+        for (i = 0; i < filter_vec.count; ++i) {
+            f = vector_get_at(&filter_vec, i);
+            rc = pcre_exec(f->re, NULL, path, strlen(path), 0, 0, NULL, 0);
+            if (rc < 0) {
+                switch (rc) {
+                case PCRE_ERROR_NOMATCH:
+                    continue;
+                default:
+                    ERROR_LOG("Match path \"%s\" failed: %d", path, rc);
+                }
+            }
+
+            /* match succeeded */
+            return 0;
+        }
+
+        return 1;
+
+    } else {
+        for (i = 0; i < filter_vec.count; ++i) {
+            f = vector_get_at(&filter_vec, i);
+            rc = pcre_exec(f->re, NULL, path, strlen(path), 0, 0, NULL, 0);
+            if (rc < 0) {
+                switch (rc) {
+                case PCRE_ERROR_NOMATCH:
+                    continue;
+                default:
+                    ERROR_LOG("Match path \"%s\" failed: %d", path, rc);
+                }
+            }
+
+            /* match succeeded */
+            return 1;
+        }
+
+        return 0;
+    }
+}
+
+
+static int filter_compile(void *key, void *value, void *userptr) {
+    vector_t           *vec = (vector_t *)userptr;
+    const char         *err;
+    int                 erroff;
+    filter_t            f;
+
+    f.re = pcre_compile((char *)value, PCRE_CASELESS, &err, &erroff, NULL);
+    if (f.re == NULL) {
+        boot_notify(-1, "regex compilation \"%s\" failed at offset(%d): %s",
+            (char *)value, erroff, err);
+        return -1;
+    }
+
+    vector_push(vec, &f);
+
+    return 0;
+}
+
+
+static void filters_free() {
+    filter_t        *f;
+    int              i;
+    
+    for (i = 0; i < filter_vec.count; ++i) {
+        f = vector_get_at(&filter_vec, i);
+        pcre_free(f->re);
+    }
+
+    vector_destroy(&filter_vec);
+}
+
+
+static int filters_compile(conf_t *conf) {
+    if (vector_init(&filter_vec, 4, sizeof(filter_t)) < 0) {
+        return -1;
+    }
+
+    if (conf_array_foreach(conf, "path_filter", filter_compile, 
+            &filter_vec) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
 
 
 static int load_filmond_plugin(void *key, void *value, void *userptr) {
@@ -353,23 +455,6 @@ static void start_ftw() {
 }
 
 
-static int ext_is_valid(char *extension) {
-    int i = 0;
-
-    if (exten[0] == NULL) {
-        return 1;
-    }
-
-    for (i = 0; exten[i]; ++i) {
-        if (!strcasecmp(extension, exten[i])) {
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-
 static int timeout_handler() {
 
     timeout = -1;
@@ -441,22 +526,27 @@ static int event_handler(struct inotify_event *event) {
 
     if (!(event->mask & IN_ISDIR)) {
         int            len;
-        char          *extension;
+        char          *filepath;
 
         len = strlen(full_path);
         if (full_path[len - 1] == '/') {
             /* Filter the directory names. */
             return 0;
         }
+
+        if (!(filepath = strstr(full_path, global_conf.moni_dir))) {
+            ERROR_LOG("Invalid file path:full_path=%s, moni_dir=%s", 
+                    full_path, global_conf.moni_dir);
+            return 0;
+        }
     
-        if (global_conf.valid_exten) {
-            if ((extension = strrchr(full_path, '.')) == NULL) {
-                return 0;
-            }
-            ++extension;
-            if (!ext_is_valid(extension)) {
-                return 0; /* skip invalid extensions */
-            }
+        filepath += strlen(global_conf.moni_dir);
+        if (*filepath == '/') {
+            ++filepath;
+        }
+
+        if (filter_skip(filepath)) {
+            return 0;
         }
     }
 
@@ -680,7 +770,6 @@ static int ftw_cb(const char *fpath, const struct stat *st,
     int                 i = 0;
     struct timespec     ts;
     char                *filepath;
-    char                *extension = NULL;
 
     if (stop) {
         return FTW_STOP;
@@ -715,17 +804,6 @@ static int ftw_cb(const char *fpath, const struct stat *st,
 
 conti:
 
-    if (global_conf.valid_exten) {
-        if ((extension = strrchr(fpath, '.')) == NULL) {
-            ERROR_LOG("No extension:%s", fpath);
-            return 0;
-        }
-        ++extension;
-        if (!ext_is_valid(extension)) {
-            return 0; /* skip invalid extensions */
-        }
-    }
-    
     if (!(filepath = strstr(fpath, global_conf.moni_dir))) {
         ERROR_LOG("Invalid file path:fpath=%s, moni_dir=%s", 
                 fpath, global_conf.moni_dir);
@@ -735,6 +813,11 @@ conti:
     filepath += strlen(global_conf.moni_dir);
     if (*filepath == '/') {
         ++filepath;
+    }
+
+    if (filter_skip(filepath)) {
+        DEBUG_LOG("filepath \"%s\" skiped", filepath);
+        return 0;
     }
 
     if (file_ftw_plugins(filepath, st) < 0) {
@@ -875,6 +958,8 @@ int main(int argc, char **argv) {
      * parse conf file.
      */
     if (conf_file) {
+        char *p;
+
         ret = conf_init(&g_conf, conf_file);
         if (ret != 0) {
             boot_notify(-1, "Load conf file \"%s\"", conf_file);
@@ -887,8 +972,6 @@ int main(int argc, char **argv) {
             "moni_dir", "/usr/local/apache2/htdocs");
         global_conf.exclude = conf_get_str_value(&g_conf,
             "exclude", NULL);
-        global_conf.valid_exten = conf_get_str_value(&g_conf, 
-            "valid_exten", NULL);
         global_conf.log_dir = conf_get_str_value(&g_conf, "log_dir", ".");
         global_conf.log_name = conf_get_str_value(&g_conf, "log_name", 
             "filmond.log");
@@ -901,6 +984,16 @@ int main(int argc, char **argv) {
         global_conf.log_multi = conf_get_int_value(&g_conf, 
             "log_multi", LOG_MULTI_NO);
 
+        p = conf_get_str_value(&g_conf, "filter_mode", "deny");
+        if (!strcasecmp(p, "allow")) {
+            filter_mode = FILTER_ALLOW;
+        } else if (!strcasecmp(p, "deny")) {
+            filter_mode = FILTER_DENY;
+        } else {
+            boot_notify(-1, "Invalid filter_mode parameter");
+            exit(1);
+        }
+
         if (load_plugins(&g_conf) < 0) {
             boot_notify(-1, "Load filmond plugins");
             exit(1);
@@ -910,15 +1003,15 @@ int main(int argc, char **argv) {
             boot_notify(-1, "NO filmond plugin loaded");
             exit(1);
         }
+
+        if (filters_compile(&g_conf) != 0) {
+            boot_notify(-1, "Compile filters");
+            exit(1);
+        }
     } else {
         boot_notify(-1, "NO config file specified");
         filmond_usage();
         exit(1);
-    }
-
-    if (global_conf.valid_exten) {
-        str_explode(NULL, (unsigned char *)global_conf.valid_exten, 
-                (unsigned char **)exten, 30);
     }
 
     if (global_conf.exclude) {
@@ -953,10 +1046,19 @@ int main(int argc, char **argv) {
         FATAL_LOG("filmond exit abnormally");
     }
 
+    inotifytools_cleanup();
 
     deinit_plugins(&g_conf);
 
     unload_plugins();
+
+    filters_free();
+
+    conf_free(&g_conf);
+
+    if (g_hostname) {
+        free(g_hostname);
+    }
 
     exit(0);
 }
