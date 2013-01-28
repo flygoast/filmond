@@ -483,6 +483,7 @@ int plugin_deinit(conf_t *conf) {
     curl_global_cleanup();
 
     for (i = 0; i < thread_num; ++i) {
+        threadpool_exit(thread_ctxs[i].pool);
         threadpool_destroy(thread_ctxs[i].pool, 1, 10);
     }
 

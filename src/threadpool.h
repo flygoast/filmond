@@ -60,5 +60,6 @@ extern int threadpool_add_task(threadpool_t *tp,
 extern void threadpool_clear_task_queue(threadpool_t *pool);
 extern int threadpool_task_over(threadpool_t *pool, int block, int timeout);
 extern int threadpool_destroy(threadpool_t *pool, int block, int timeout);
+extern void threadpool_exit(threadpool_t *pool);
 
 #endif /* __THREADPOOL_H_INCLUDED__ */
