@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdbool.h>
 #include <pwd.h>
 #include <errno.h>
 #include "plugin.h"
@@ -9,6 +10,8 @@
 #include "threadpool.h"
 #include "curl/curl.h"
 #include "json/json.h"
+#include "tcutil.h"
+#include "tchdb.h"
 
 #define KEY_SIZE            33
 #define URI_LIMIT           1024
@@ -31,6 +34,8 @@ static struct curl_slist  *list;
 static char               *submit_addr;
 static char               *submit_host;
 static char               *moni_dir;
+static char               *tch_file;
+static TCHDB              *hdb;
 static thread_ctx_t       *thread_ctxs;
 static int                 thread_num;
 static char                add_uri[URI_LIMIT];
@@ -56,34 +61,26 @@ static int get_pool_id(const char *filepath) {
 }
 
 
-static void add_fileinfo_json(json_object *obj, char *filepath, 
+static json_object *create_fileinfo_json(char *filepath, 
         const struct stat *st) {
+    int              ecode;
     char             buf[BUF_SIZE] = {};
     char            *buf_big = NULL;
     int              filepath_len;
     int              base64_len;
-    int              i;
     struct passwd    pw, *ret_pw;
     json_object     *fileinfo_json;
-    unsigned char    hash[16];
-    char             key[KEY_SIZE];
-    char            *ptr = key;
-    char            *end = ptr + KEY_SIZE;
-
-    /*
-     * calculate MD5 of 'filepath'
-     */
-    md5(hash, (unsigned char*)filepath, strlen(filepath));
-    for (i = 0; i < 16; ++i) {
-        ptr += snprintf(ptr, end - ptr, "%02x", hash[i]);
-    }
+    char            *ptr = buf;
 
     if (st == NULL) { /* for DELETE event */
-        json_object_object_add(obj, key, json_object_new_object());
-        return;
-    }
+        if (!tchdbout2(hdb, filepath)) {
+            ecode = tchdbecode(hdb);
+            ERROR_LOG("tchdbout2 \"%s\" failed: %s", filepath, 
+                    tchdberrmsg(ecode));
+        }
 
-    ptr = buf;
+        return json_object_new_object();
+    }
 
     /*
      * calculate BASE64 of 'filepath'
@@ -104,26 +101,49 @@ static void add_fileinfo_json(json_object *obj, char *filepath,
         json_object_new_string_len(ptr, base64_len));
 
     json_object_object_add(fileinfo_json, "size", 
-        json_object_new_int(st->st_size));
+        json_object_new_int64(st->st_size));
 
     json_object_object_add(fileinfo_json, "mtime",
-        json_object_new_int(st->st_mtime));
+        json_object_new_int64(st->st_mtime));
 
     json_object_object_add(fileinfo_json, "mode",
-        json_object_new_int(st->st_mode));
+        json_object_new_int64(st->st_mode));
 
     assert(getpwuid_r(st->st_uid, &pw, buf, 1024, &ret_pw) == 0);
 
     json_object_object_add(fileinfo_json, "owner",
         json_object_new_string(pw.pw_name));
 
-    json_object_object_add(obj, key, fileinfo_json);
-
-    DEBUG_LOG("File: %s, MD5: %s, SIZE: %lu", filepath, key, st->st_size);
-
     if (buf_big) {
         free(buf_big);
     }
+
+    if (!tchdbput2(hdb, filepath, json_object_get_string(fileinfo_json))) {
+        ecode = tchdbecode(hdb);
+        ERROR_LOG("tchdbput2 \"%s\" failed: %s", filepath, tchdberrmsg(ecode));
+    }
+
+    return fileinfo_json;
+}
+
+
+static void add_fileinfo_json(json_object *obj, char *filepath, 
+        const struct stat *st) {
+    int              i;
+    unsigned char    hash[16];
+    char             key[KEY_SIZE];
+    char            *ptr = key;
+    char            *end = ptr + KEY_SIZE;
+
+    /*
+     * calculate MD5 of 'filepath'
+     */
+    md5(hash, (unsigned char*)filepath, strlen(filepath));
+    for (i = 0; i < 16; ++i) {
+        ptr += snprintf(ptr, end - ptr, "%02x", hash[i]);
+    }
+
+    json_object_object_add(obj, key, create_fileinfo_json(filepath, st));
 }
 
 
@@ -244,8 +264,57 @@ static void submit_file(char action, json_object *obj, int pool_id) {
 }
 
 
+static int should_submit(const char *filepath, const struct stat *st) {
+    char            *value;
+    json_object     *obj;
+    struct passwd    pw, *ret_pw;
+    char             buf[BUF_SIZE] = {};
+
+    value = tchdbget2(hdb, filepath);
+    if (!value) {
+        return 1;
+    }
+
+    obj = json_tokener_parse(value);
+    if (is_error(obj) || json_object_get_type(obj) != json_type_object) {
+        return 1;
+    } else {
+        struct json_object *j;
+
+        j = json_object_object_get(obj, "size");
+        if (j == NULL || json_object_get_int64(j) != st->st_size) {
+            return 1;
+        }
+
+        j = json_object_object_get(obj, "mtime");
+        if (j == NULL || json_object_get_int64(j) != st->st_mtime) {
+            return 1;
+        }
+
+        j = json_object_object_get(obj, "mode");
+        if (j == NULL || json_object_get_int64(j) != st->st_mode) {
+            return 1;
+        }
+
+        assert(getpwuid_r(st->st_uid, &pw, buf, 1024, &ret_pw) == 0);
+
+        j = json_object_object_get(obj, "owner");
+
+        if (j == NULL || strcmp(pw.pw_name, json_object_get_string(j))) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+
 int plugin_file_ftw(const char *filepath, const struct stat *st) {
     int pool_id = get_pool_id(filepath);
+
+    if (!should_submit(filepath, st)) {
+        return FILMOND_DECLINED;
+    }
 
     if (thread_ctxs[pool_id].files_json == NULL) {
         thread_ctxs[pool_id].files_json = json_object_new_object();
@@ -273,7 +342,6 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
     json_object     *files_obj;
     char            *path;
     int              pool_id;
-    
 
     switch (action) {
     case ACTION_FILE_ATTRIB:
@@ -331,6 +399,7 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
 
 int plugin_init(conf_t *conf) {
     int   i;
+    int   ecode;
     char  header_buf[128];
 
     moni_dir = conf_get_str_value(conf, "moni_dir",
@@ -339,9 +408,28 @@ int plugin_init(conf_t *conf) {
     submit_host = conf_get_str_value(conf, "submit_host", NULL);
     thread_stack = conf_get_int_value(conf, "thread_stack", 1048576);
     thread_num = conf_get_int_value(conf, "thread_num", 10);
+    tch_file = conf_get_str_value(conf, "tch_file", "filmond.tch");
 
     if (!submit_addr) {
         boot_notify(-1, "No submit address");
+        return FILMOND_ERROR;
+    }
+
+    hdb = tchdbnew();
+    if (hdb == NULL) {
+        boot_notify(-1, "tchdbnew failed: out of memory");
+        return FILMOND_ERROR;
+    }
+
+    if (!tchdbsetmutex(hdb)) {
+        ecode = tchdbecode(hdb);
+        boot_notify(-1, "tchdbsetmutex failed: %s", tchdberrmsg(ecode));
+        return FILMOND_ERROR;
+    }
+
+    if (!tchdbopen(hdb, tch_file, HDBOWRITER|HDBOCREAT)) {
+        ecode = tchdbecode(hdb);
+        boot_notify(-1, "tchdbopen failed: %s", tchdberrmsg(ecode));
         return FILMOND_ERROR;
     }
 
@@ -380,6 +468,7 @@ int plugin_init(conf_t *conf) {
     }
 
     list = curl_slist_append(list, "Content-Type: application/json");
+    list = curl_slist_append(list, "User-Agent: filmond/" FILMOND_VERSION);
 
     return FILMOND_DECLINED;
 }
@@ -387,6 +476,7 @@ int plugin_init(conf_t *conf) {
 
 int plugin_deinit(conf_t *conf) {
     int  i;
+    int  ecode;
 
     curl_slist_free_all(list);
 
@@ -398,8 +488,17 @@ int plugin_deinit(conf_t *conf) {
 
     free(thread_ctxs);
 
+    if (!tchdbclose(hdb)) {
+        ecode = tchdbecode(hdb);
+        ERROR_LOG("tchdbclose failed:%s", tchdberrmsg(ecode));
+        return FILMOND_ERROR;
+    }
+
+    tchdbdel(hdb);
+
     return FILMOND_DECLINED;
 }
+
 
 int plugin_ftw_post() {
     int  i;
