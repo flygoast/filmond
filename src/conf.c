@@ -611,7 +611,7 @@ int conf_array_foreach(conf_t *conf,
     conf_value_t *cv = (conf_value_t*)hash_get_val(conf->ht, key);
 
     if (!cv) {
-        return -1;
+        return 0;
     }
 
     if (cv->type == CONF_TYPE_BLOCK) {

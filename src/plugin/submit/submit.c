@@ -10,8 +10,11 @@
 #include "threadpool.h"
 #include "curl/curl.h"
 #include "json/json.h"
+
+#ifdef NEED_TCH
 #include "tcutil.h"
 #include "tchdb.h"
+#endif /* NEED_TCH */
 
 #define KEY_SIZE            33
 #define URI_LIMIT           1024
@@ -34,8 +37,10 @@ static struct curl_slist  *list;
 static char               *submit_addr;
 static char               *submit_host;
 static char               *moni_dir;
+#ifdef NEED_TCH
 static char               *tch_file;
 static TCHDB              *hdb;
+#endif /* NEED_TCH */
 static thread_ctx_t       *thread_ctxs;
 static int                 thread_num;
 static char                add_uri[URI_LIMIT];
@@ -63,7 +68,9 @@ static int get_pool_id(const char *filepath) {
 
 static json_object *create_fileinfo_json(char *filepath, 
         const struct stat *st) {
+#ifdef NEED_TCH
     int              ecode;
+#endif /* NEED_TCH */
     char             buf[BUF_SIZE] = {};
     char            *buf_big = NULL;
     int              filepath_len;
@@ -73,11 +80,13 @@ static json_object *create_fileinfo_json(char *filepath,
     char            *ptr = buf;
 
     if (st == NULL) { /* for DELETE event */
+#ifdef NEED_TCH
         if (!tchdbout2(hdb, filepath)) {
             ecode = tchdbecode(hdb);
             ERROR_LOG("tchdbout2 \"%s\" failed: %s", filepath, 
                     tchdberrmsg(ecode));
         }
+#endif /* NEED_TCH */
 
         return json_object_new_object();
     }
@@ -118,10 +127,12 @@ static json_object *create_fileinfo_json(char *filepath,
         free(buf_big);
     }
 
+#ifdef NEED_TCH
     if (!tchdbput2(hdb, filepath, json_object_get_string(fileinfo_json))) {
         ecode = tchdbecode(hdb);
         ERROR_LOG("tchdbput2 \"%s\" failed: %s", filepath, tchdberrmsg(ecode));
     }
+#endif /* NEED_TCH */
 
     return fileinfo_json;
 }
@@ -185,6 +196,7 @@ static void submit_file_info(void *arg) {
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, list);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, response);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1);
 
     res = curl_easy_perform(curl);
     if (res != 0) {
@@ -264,6 +276,8 @@ static void submit_file(char action, json_object *obj, int pool_id) {
 }
 
 
+#ifdef NEED_TCH
+
 static int should_submit(const char *filepath, const struct stat *st) {
     char            *value;
     json_object     *obj;
@@ -308,13 +322,16 @@ static int should_submit(const char *filepath, const struct stat *st) {
     return 0;
 }
 
+#endif /* NEED_TCH */
 
 int plugin_file_ftw(const char *filepath, const struct stat *st) {
     int pool_id = get_pool_id(filepath);
 
+#ifdef NEED_TCH
     if (!should_submit(filepath, st)) {
         return FILMOND_DECLINED;
     }
+#endif /* NEED_TCH */
 
     if (thread_ctxs[pool_id].files_json == NULL) {
         thread_ctxs[pool_id].files_json = json_object_new_object();
@@ -399,7 +416,9 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
 
 int plugin_init(conf_t *conf) {
     int   i;
+#ifdef NEED_TCH
     int   ecode;
+#endif /* NEED_TCH */
     char  header_buf[128];
 
     moni_dir = conf_get_str_value(conf, "moni_dir",
@@ -408,13 +427,16 @@ int plugin_init(conf_t *conf) {
     submit_host = conf_get_str_value(conf, "submit_host", NULL);
     thread_stack = conf_get_int_value(conf, "thread_stack", 1048576);
     thread_num = conf_get_int_value(conf, "thread_num", 10);
+#ifdef NEED_TCH
     tch_file = conf_get_str_value(conf, "tch_file", "filmond.tch");
+#endif /* NEED_TCH */
 
     if (!submit_addr) {
         boot_notify(-1, "No submit address");
         return FILMOND_ERROR;
     }
 
+#ifdef NEED_TCH
     hdb = tchdbnew();
     if (hdb == NULL) {
         boot_notify(-1, "tchdbnew failed: out of memory");
@@ -432,6 +454,7 @@ int plugin_init(conf_t *conf) {
         boot_notify(-1, "tchdbopen failed: %s", tchdberrmsg(ecode));
         return FILMOND_ERROR;
     }
+#endif /* NEED_TCH */
 
     if (curl_global_init(CURL_GLOBAL_ALL) != 0) {
         boot_notify(-1, "Initialize curl");
@@ -476,7 +499,9 @@ int plugin_init(conf_t *conf) {
 
 int plugin_deinit(conf_t *conf) {
     int  i;
+#ifdef NEED_TCH
     int  ecode;
+#endif /* NEED_TCH */
 
     curl_slist_free_all(list);
 
@@ -489,6 +514,7 @@ int plugin_deinit(conf_t *conf) {
 
     free(thread_ctxs);
 
+#ifdef NEED_TCH
     if (!tchdbclose(hdb)) {
         ecode = tchdbecode(hdb);
         ERROR_LOG("tchdbclose failed:%s", tchdberrmsg(ecode));
@@ -496,6 +522,7 @@ int plugin_deinit(conf_t *conf) {
     }
 
     tchdbdel(hdb);
+#endif /* NEED_TCH */
 
     return FILMOND_DECLINED;
 }

@@ -44,7 +44,9 @@ int load_so(void **phandle, symbol_t *sym, const char *filename) {
 
 void unload_so(void **phandle) {
     if (*phandle != NULL) {
-        dlclose(*phandle);
+        if (dlclose(*phandle) != 0) {
+            ERROR_LOG("%s", dlerror());
+        }
         *phandle = NULL;
     }
 }

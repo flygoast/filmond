@@ -32,7 +32,10 @@ file_target_mode     420
 submit_addr     http://127.0.0.1/submit
 submit_host     www.flygoast.net
 thread_stack    1048576
-tch_file        filmond.tch
+#=================================================
+# This config can be used only defined NEED_TCH
+#tch_file        filmond.tch
+#=================================================
 
 #===============================
 # log file configs

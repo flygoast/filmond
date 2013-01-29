@@ -34,7 +34,7 @@ Requirements
 
 * **json-c**(https://github.com/json-c/json-c)
 
-* **tokyocabinet**(http://fallabs.com/tokyocabinet)
+* **tokyocabinet**(http://fallabs.com/tokyocabinet) ***OPTIONAL***
 
 * **pcre**(http://www.pcre.org/)
 
