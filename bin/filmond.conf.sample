@@ -1,10 +1,10 @@
 moni_dir        /home/flygoast/
 exclude         /home/flygoast/demo/dummy
 filter_mode     deny 
-path_filter     "\.apk$"
-path_filter     "\.7z$"
-path_filter     "\.gz$"
-path_filter     ".*.*$"
+path_filter     \.apk$
+path_filter     \.7z$
+path_filter     \.gz$
+path_filter     .*.*$
 
 
 #=====================================
