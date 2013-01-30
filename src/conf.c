@@ -259,6 +259,10 @@ static char *conf_evaluate(conf_t *conf, char *value) {
         return value;
     }
 
+    if (*(scan + 1) == '\0') {
+        return value;
+    }
+
     buf = (char *)calloc(MAX_LINE, sizeof(char));
     if (!buf) {
         return NULL;
@@ -470,7 +474,7 @@ static int conf_parse(conf_t *conf, char *resolved_path,
         } else {
             if (field[0] && field[0][0] == '}') {
                 if (block) {
-                    return 0;
+                    return 0;   /* parse block over */
                 } else {
                     ret = -1;
                     goto error;
