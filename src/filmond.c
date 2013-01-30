@@ -91,6 +91,7 @@ typedef struct filmond_plugin_s {
 
 typedef struct filter_s {
     pcre        *re;
+    char        *regex;
 } filter_t;
 
 
@@ -135,6 +136,7 @@ static int filter_skip(const char *path) {
             }
 
             /* match succeeded */
+            DEBUG_LOG("Skip \"%s\" due to regex: \"%s\"", path, f->regex);
             return 1;
         }
 
@@ -155,6 +157,8 @@ static int filter_compile(void *key, void *value, void *userptr) {
             (char *)value, erroff, err);
         return -1;
     }
+    f.regex = strdup((char *)value);
+    assert(f.regex);
 
     vector_push(vec, &f);
 
@@ -169,6 +173,9 @@ static void filters_free() {
     for (i = 0; i < filter_vec.count; ++i) {
         f = vector_get_at(&filter_vec, i);
         pcre_free(f->re);
+        if (f->regex) {
+            free(f->regex);
+        }
     }
 
     vector_destroy(&filter_vec);
