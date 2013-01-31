@@ -10,9 +10,8 @@ path_filter     .*.*$
 #=====================================
 # plugin directory
 #=====================================
-so_dir          .
 plugin_so       submit.so
-#plugin_so       chmod.so
+plugin_so       chmod.so
 
 #===================================
 # chmod plugin configs
