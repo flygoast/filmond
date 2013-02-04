@@ -1,0 +1,85 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="chrome=1">
+    <title>Filmond by flygoast</title>
+    <link rel="stylesheet" href="stylesheets/styles.css">
+    <link rel="stylesheet" href="stylesheets/pygment_trac.css">
+    <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.7.1/jquery.min.js"></script>
+    <script src="javascripts/respond.js"></script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <!--[if lt IE 8]>
+    <link rel="stylesheet" href="stylesheets/ie.css">
+    <![endif]-->
+    <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+
+  </head>
+  <body>
+      <div id="header">
+        <nav>
+          <li class="fork"><a href="https://github.com/flygoast/filmond">View On GitHub</a></li>
+          <li class="downloads"><a href="https://github.com/flygoast/filmond/zipball/master">ZIP</a></li>
+          <li class="downloads"><a href="https://github.com/flygoast/filmond/tarball/master">TAR</a></li>
+          <li class="title">DOWNLOADS</li>
+        </nav>
+      </div><!-- end header -->
+
+    <div class="wrapper">
+
+      <section>
+        <div id="title">
+          <h1>Filmond</h1>
+          <p>A files monitor and a file informaton collector using linux inotify.</p>
+          <hr>
+          <span class="credits left">Project maintained by <a href="https://github.com/flygoast">flygoast</a></span>
+          <span class="credits right">Hosted on GitHub Pages &mdash; Theme by <a href="http://twitter.com/#!/michigangraham">mattgraham</a></span>
+        </div>
+
+        <h1>filmond</h1>
+
+<h2>Description</h2>
+
+<p><code>filmond</code> is a file monitor and a file information collector implemented using
+Linux inotify. So it only can run on Linux.</p>
+
+<p>When some files created, changed, accessed or deleted, it will send 
+informations of the file to a controling server which you should 
+prepare for gathering the reporting.</p>
+
+<p>The information is reported through HTTP. You can use any server-end script
+to process them. You can also write your plugin to process the file event
+according to your need. Please refer the plugin directory.</p>
+
+<h2>Plugins</h2>
+
+<ul>
+<li><p><strong>submit</strong>: By HTTP, submit file information to remote server.</p></li>
+<li><p><strong>chmod</strong>: Process invalid file and directory permisssion.</p></li>
+<li><p><strong>demo</strong>: A demo as tutorial for filmond plugin development.</p></li>
+</ul><h2>Requirements</h2>
+
+<ul>
+<li><p><strong>inotifytool</strong>(<a href="https://github.com/rvoicilas/inotify-tools">https://github.com/rvoicilas/inotify-tools</a>)</p></li>
+<li><p><strong>libcurl</strong>(<a href="https://github.com/bagder/curl">https://github.com/bagder/curl</a>)</p></li>
+<li><p><strong>json-c</strong>(<a href="https://github.com/json-c/json-c">https://github.com/json-c/json-c</a>)</p></li>
+<li><p><strong>tokyocabinet</strong>(<a href="http://fallabs.com/tokyocabinet">http://fallabs.com/tokyocabinet</a>) <strong><em>OPTIONAL</em></strong></p></li>
+<li><p><strong>pcre</strong>(<a href="http://www.pcre.org/">http://www.pcre.org/</a>)</p></li>
+</ul><h2>Build</h2>
+
+<pre><code># make
+# make install
+</code></pre>
+
+<h2>Limits</h2>
+
+<p>It can ONLY run at Linux.</p>
+      </section>
+
+    </div>
+    <!--[if !IE]><script>fixScale(document);</script><![endif]-->
+    
+  </body>
+</html>
