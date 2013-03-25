@@ -230,8 +230,6 @@ static void submit_file_info(void *arg) {
             } else {
                 if (strcmp("no error", json_object_get_string(j))) {
                     ERROR_LOG("Invalid json string: %s", response);
-                } else {
-                    DEBUG_LOG("submit success");
                 }
             }
         }
