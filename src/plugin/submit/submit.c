@@ -352,7 +352,7 @@ int plugin_file_ftw(const char *filepath, const struct stat *st) {
 
 
 /*
- * moved_from is valid only when action is ACTION_FILE_MOVE
+ * "moved_from' is valid only when action is ACTION_FILE_MOVE
  */
 int plugin_file_event(int action, char *filepath, char *moved_from) {
     struct stat      st;
@@ -371,12 +371,15 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
         pool_id = get_pool_id(path);
 
         if (stat(filepath, &st) < 0) {
-            ERROR_LOG("stat %s failed:%s", filepath, strerror(errno));
+            ERROR_LOG("stat %s failed: %s", filepath, strerror(errno));
             return FILMOND_DECLINED;
         }
 
         files_obj = json_object_new_object();
         add_fileinfo_json(files_obj, path, &st);
+
+        DEBUG_LOG("ADD_OR_MOD: %s", path);
+
         submit_file(ACTION_ADD_OR_MOD, files_obj, pool_id);
         json_object_put(files_obj);
         break;
@@ -391,6 +394,9 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
 
         files_obj = json_object_new_object();
         add_fileinfo_json(files_obj, path, NULL);
+
+        DEBUG_LOG("DEL: %s", path);
+
         submit_file(ACTION_DEL, files_obj, pool_id);
         json_object_put(files_obj);
         break;
@@ -405,6 +411,9 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
 
         files_obj = json_object_new_object();
         add_fileinfo_json(files_obj, path, NULL);
+
+        DEBUG_LOG("DEL: %s", path);
+
         submit_file(ACTION_DEL, files_obj, pool_id);
         json_object_put(files_obj);
         break;
