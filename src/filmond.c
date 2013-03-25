@@ -823,7 +823,6 @@ conti:
     }
 
     if (filter_skip(filepath)) {
-        DEBUG_LOG("filepath \"%s\" skiped", filepath);
         return 0;
     }
 
