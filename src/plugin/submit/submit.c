@@ -359,6 +359,7 @@ int plugin_file_event(int action, char *filepath, char *moved_from) {
     int              pool_id;
 
     switch (action) {
+    case ACTION_FILE_CREATE:
     case ACTION_FILE_ATTRIB:
     case ACTION_FILE_MODIFY:
         path = filepath + strlen(moni_dir);
